@@ -41,10 +41,16 @@ namespace FilesystemModule
         // Deserializes setting from json object (e.g. from UI input) TODO: Maybe change key to "return" as UI currently uses
         virtual void fromJson(JsonObjectConst& obj) = 0;
 
-        // Saves setting value to Preferences
+        // Saves setting value to Preferences. If prefs is not already open this
+        // opens the namespace read-write and closes it; if the caller has
+        // already opened it (e.g. to batch-write many settings in a single
+        // transaction) the existing handle is reused and left open for the
+        // caller to close.
         virtual void saveToPreferences(Preferences& prefs) const = 0;
 
-        // Loads setting value from Preferences (if exists)
+        // Loads setting value from Preferences (if exists). Same lifecycle rule
+        // as saveToPreferences, but opens the namespace read-only when it owns
+        // the handle.
         virtual void loadFromPreferences(Preferences& prefs) = 0;
 
         virtual std::string getType() const = 0;
@@ -99,11 +105,15 @@ namespace FilesystemModule
         }
 
         void saveToPreferences(Preferences& prefs) const override {
+            bool opened = prefs.begin(preference_namespace, false);
             prefs.putInt(key.c_str(), value);
+            if (opened) prefs.end();
         }
 
         void loadFromPreferences(Preferences& prefs) override {
+            bool opened = prefs.begin(preference_namespace, true);
             value = clamp((int)prefs.getInt(key.c_str(), default_value), min, max);
+            if (opened) prefs.end();
         }
 
         std::string getType() const override {
@@ -137,11 +147,15 @@ namespace FilesystemModule
         }
 
         void saveToPreferences(Preferences& prefs) const override {
+            bool opened = prefs.begin(preference_namespace, false);
             prefs.putFloat(key.c_str(), value);
+            if (opened) prefs.end();
         }
 
         void loadFromPreferences(Preferences& prefs) override {
+            bool opened = prefs.begin(preference_namespace, true);
             value = clamp(prefs.getFloat(key.c_str(), default_value), min, max);
+            if (opened) prefs.end();
         }
 
         std::string getType() const override {
@@ -181,11 +195,15 @@ namespace FilesystemModule
         }
 
         void saveToPreferences(Preferences& prefs) const override {
+            bool opened = prefs.begin(preference_namespace, false);
             prefs.putInt(key.c_str(), currentIndex());
+            if (opened) prefs.end();
         }
 
         void loadFromPreferences(Preferences& prefs) override {
+            bool opened = prefs.begin(preference_namespace, true);
             int idx = prefs.getInt(key.c_str(), defaultIndex());
+            if (opened) prefs.end();
             setByIndex(idx);
         }
 
@@ -254,16 +272,20 @@ namespace FilesystemModule
         }
 
         void saveToPreferences(Preferences& prefs) const override {
+            bool opened = prefs.begin(preference_namespace, false);
             prefs.putString(key.c_str(), value.c_str());
+            if (opened) prefs.end();
         }
 
         void loadFromPreferences(Preferences& prefs) override {
+            bool opened = prefs.begin(preference_namespace, true);
             if (prefs.isKey(key.c_str())) {
                 std::string loaded = prefs.getString(key.c_str(), default_value.c_str()).c_str();
                 value = sanitize(loaded);
             } else {
                 value = default_value;
             }
+            if (opened) prefs.end();
         }
 
         std::string getType() const override {
@@ -311,11 +333,15 @@ namespace FilesystemModule
         }
 
         void saveToPreferences(Preferences& prefs) const override {
+            bool opened = prefs.begin(preference_namespace, false);
             prefs.putBool(key.c_str(), value);
+            if (opened) prefs.end();
         }
 
         void loadFromPreferences(Preferences& prefs) override {
+            bool opened = prefs.begin(preference_namespace, true);
             value = prefs.getBool(key.c_str(), default_value);
+            if (opened) prefs.end();
         }
 
         std::string getType() const override {

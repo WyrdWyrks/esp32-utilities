@@ -228,9 +228,7 @@ namespace FilesystemModule
                 doc[SettingsInterface::write_key] = doc["SettingValue"];
                 auto obj = doc.as<ArduinoJson::JsonObjectConst>();
                 setting->fromJson(obj);
-                SettingsPreference().begin(SettingsInterface::preference_namespace, false);
                 setting->saveToPreferences(SettingsPreference());
-                SettingsPreference().end();
                 ESP_LOGI(TAG, "Updated setting: %s to %s", key.c_str(), doc["SettingValue"].as<const char*>());
 
                 doc.clear();
@@ -251,6 +249,8 @@ namespace FilesystemModule
 
             if (!doc["Settings"].isNull() && doc["Settings"].is<JsonArray>())
             {
+                // Open once so the whole batch writes in a single transaction;
+                // each saveToPreferences reuses this handle.
                 SettingsPreference().begin(SettingsInterface::preference_namespace, false);
                 Preferences& prefs = SettingsPreference();
                 auto settingsArray = doc["Settings"].as<JsonArray>();
@@ -273,7 +273,7 @@ namespace FilesystemModule
                     s->saveToPreferences(prefs);
                     ESP_LOGI(TAG, "Updated setting: %s to %s", key.c_str(), entry["SettingValue"].as<const char*>());
                 }
-                
+
                 SettingsPreference().end();
             }
             else

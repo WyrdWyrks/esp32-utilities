@@ -158,9 +158,7 @@ namespace DisplayModule
             serializeJson(payloadObj, debugStr);
             ESP_LOGI(TAG, "Applying edit result with payload: %s", debugStr.c_str());
             (*_settingsIt)->fromJson(payloadObj);
-            FilesystemModule::Utilities::SettingsPreference().begin(FilesystemModule::SettingsInterface::preference_namespace, false);
             (*_settingsIt)->saveToPreferences(FilesystemModule::Utilities::SettingsPreference());
-            FilesystemModule::Utilities::SettingsPreference().end();
         }
 
         // ------------------------------------------------------------------
