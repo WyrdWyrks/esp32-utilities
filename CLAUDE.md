@@ -231,9 +231,10 @@ Namespace: `NavigationModule::`
 
 ```cpp
 virtual bool TryGetCurrentLocation(double& outLat, double& outLon) = 0;
+virtual const char* GetMoniker() const = 0;
 ```
 
-Returns `true` and populates `outLat`/`outLon` (WGS84 decimal degrees) on success. `NavigationModule::Utilities::GetCurrentLocation()` iterates registered sources in order, first success wins.
+Returns `true` and populates `outLat`/`outLon` (WGS84 decimal degrees) on success. `NavigationModule::Utilities::GetCurrentLocation()` iterates registered sources in order, first success wins. `GetMoniker()` returns a short identifier for the source (e.g. `"GpsSource"`, `"StaticLocation"`) for debug logging.
 
 ### GpsGeolocationSource
 
@@ -248,7 +249,7 @@ NavigationModule::Utilities::RegisterLocationSource(&src);
 ### Adding a New Geolocation Source
 
 1. Create a header-only class at `include/HelperClasses/Geolocation/<ClassName>.hpp`
-2. Inherit `NavigationModule::GeolocationInterface`, implement `TryGetCurrentLocation(double&, double&)`
+2. Inherit `NavigationModule::GeolocationInterface`, implement `TryGetCurrentLocation(double&, double&)` and `GetMoniker() const`
 3. Register with `NavigationModule::Utilities::RegisterLocationSource()` in app init
 
 ### NavigationModule::Utilities Geolocation API
@@ -257,5 +258,6 @@ NavigationModule::Utilities::RegisterLocationSource(&src);
 |---|---|
 | `RegisterLocationSource(ptr)` | Add a geolocation source to the polling list |
 | `GetCurrentLocation(double& lat, double& lon)` | Poll sources; returns bool, first success wins |
+| `GetCurrentLocation(double& lat, double& lon, std::string& moniker)` | Same, and reports which source's moniker produced the fix |
 | `LocationSources()` | `vector<GeolocationInterface*>&` — Meyers singleton |
 

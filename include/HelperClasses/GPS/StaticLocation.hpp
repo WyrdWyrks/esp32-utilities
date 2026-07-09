@@ -16,6 +16,8 @@ namespace NavigationModule
             return true;
         }
 
+        const char* GetMoniker() const override { return "static"; }
+
     private:
         double _lat;
         double _lon;

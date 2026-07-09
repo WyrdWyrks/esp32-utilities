@@ -42,6 +42,8 @@ namespace NavigationModule
             return true;
         }
 
+        const char* GetMoniker() const override { return "gps"; }
+
     protected:
         TinyGPSPlus& _gps;
         Stream &_gpsStream;

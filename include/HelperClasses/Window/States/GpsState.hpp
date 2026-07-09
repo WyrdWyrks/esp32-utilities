@@ -10,7 +10,9 @@ namespace DisplayModule
     // -------------------------------------------------------------------------
     // GpsState
     // -------------------------------------------------------------------------
-    // Displays current GPS latitude and longitude.
+    // Displays current latitude, longitude, and which registered
+    // GeolocationInterface source produced the fix (e.g. "GpsSource",
+    // "StaticLocation") — useful for debugging.
     // Refreshes at 1 Hz via refreshIntervalMs().
     //
     // Shows "GPS Not Connected" when no fix is available.
@@ -54,20 +56,22 @@ namespace DisplayModule
             clearDrawCommands();
 
             double myLat, myLon;
+            std::string moniker;
+            uint8_t displayLine = 1;
 
-            if (NavigationUtils::GetCurrentLocation(myLat, myLon))
+            if (NavigationUtils::GetCurrentLocation(myLat, myLon, moniker))
             {
-                char lat[32], lon[32];
-                snprintf(lat, sizeof(lat), "Lat: %.8f", myLat);
-                snprintf(lon, sizeof(lon), "Lon: %.8f", myLon);
-
                 addDrawCommand(std::make_shared<TextDrawCommand>(
-                    std::string(lat),
-                    TextFormat{ TextAlignH::LEFT, TextAlignV::LINE, 1 }
+                    _formatCoord("Lat", myLat),
+                    TextFormat{ TextAlignH::CENTER, TextAlignV::LINE, displayLine++ }
                 ));
                 addDrawCommand(std::make_shared<TextDrawCommand>(
-                    std::string(lon),
-                    TextFormat{ TextAlignH::LEFT, TextAlignV::LINE, 2 }
+                    _formatCoord("Lon", myLon),
+                    TextFormat{ TextAlignH::CENTER, TextAlignV::LINE, displayLine++ }
+                ));
+                addDrawCommand(std::make_shared<TextDrawCommand>(
+                    "Source: " + moniker,
+                    TextFormat{ TextAlignH::CENTER, TextAlignV::LINE, displayLine++ }
                 ));
             }
             else
@@ -76,13 +80,14 @@ namespace DisplayModule
                     "GPS Not Connected",
                     TextFormat{ TextAlignH::CENTER, TextAlignV::LINE, 2 }
                 ));
-
-                // std::string satelliteStr = "Satellites: " + std::to_string(NavigationUtils::GetSatelliteCount());
-                // addDrawCommand(std::make_shared<TextDrawCommand>(
-                //     satelliteStr,
-                //     TextFormat{ TextAlignH::CENTER, TextAlignV::LINE, 3 }
-                // ));
             }
+        }
+
+        static std::string _formatCoord(const char *label, double value)
+        {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%s: %.8f", label, value);
+            return std::string(buf);
         }
     };
 

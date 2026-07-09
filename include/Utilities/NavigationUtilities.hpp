@@ -543,9 +543,18 @@ namespace NavigationModule
         // queries each registered source inline.
         static bool GetCurrentLocation(double& outLat, double& outLon)
         {
+            std::string moniker;
+            return GetCurrentLocation(outLat, outLon, moniker);
+        }
+
+        // Overload that also reports which registered GeolocationInterface the
+        // fix came from (e.g. "GpsSource", "StaticLocation") — useful for
+        // debugging which source is actually driving the current position.
+        static bool GetCurrentLocation(double& outLat, double& outLon, std::string& outMoniker)
+        {
             if (!_PollingEnabled())
             {
-                return _FetchFromSources(outLat, outLon);
+                return _FetchFromSources(outLat, outLon, outMoniker);
             }
 
             bool ok = false;
@@ -557,13 +566,14 @@ namespace NavigationModule
                 {
                     outLat = _CachedLat();
                     outLon = _CachedLon();
+                    outMoniker = _CachedMoniker();
                 }
                 xSemaphoreGive(_CacheMutex());
             }
 
             if (ok)
             {
-                ESP_LOGD(TAG, "Returning cached location. Lat: %f, Lon: %f", outLat, outLon);
+                ESP_LOGD(TAG, "Returning cached location from %s. Lat: %f, Lon: %f", outMoniker.c_str(), outLat, outLon);
             }
             else
             {
@@ -578,7 +588,8 @@ namespace NavigationModule
         static void RefreshLocationCache()
         {
             double lat, lon;
-            if (!_FetchFromSources(lat, lon))
+            std::string moniker;
+            if (!_FetchFromSources(lat, lon, moniker))
             {
                 return;
             }
@@ -587,6 +598,7 @@ namespace NavigationModule
             {
                 _CachedLat() = lat;
                 _CachedLon() = lon;
+                _CachedMoniker() = moniker;
                 _CacheTimestampMs() = millis();
                 _CacheValid() = true;
                 xSemaphoreGive(_CacheMutex());
@@ -608,13 +620,14 @@ namespace NavigationModule
         // Iterates the registered location sources, returning the first success.
         // This is the original on-demand fetch behavior, extracted so both the
         // legacy path and the background poll task can reuse it.
-        static bool _FetchFromSources(double& outLat, double& outLon)
+        static bool _FetchFromSources(double& outLat, double& outLon, std::string& outMoniker)
         {
             for (auto* src : LocationSources())
             {
                 if (src->TryGetCurrentLocation(outLat, outLon))
                 {
-                    ESP_LOGD(TAG, "Location obtained. Lat: %f, Lon: %f", outLat, outLon);
+                    outMoniker = src->GetMoniker();
+                    ESP_LOGD(TAG, "Location obtained from %s. Lat: %f, Lon: %f", outMoniker.c_str(), outLat, outLon);
                     return true;
                 }
             }
@@ -632,6 +645,7 @@ namespace NavigationModule
         // ---- Location cache state (used when background polling is enabled) ----
         static double& _CachedLat() { static double lat = 0.0; return lat; }
         static double& _CachedLon() { static double lon = 0.0; return lon; }
+        static std::string& _CachedMoniker() { static std::string moniker; return moniker; }
         static uint32_t& _CacheTimestampMs() { static uint32_t ts = 0; return ts; }
         static bool& _CacheValid() { static bool valid = false; return valid; }
         static bool& _PollingEnabled() { static bool enabled = false; return enabled; }
