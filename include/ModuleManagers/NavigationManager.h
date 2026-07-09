@@ -16,6 +16,7 @@ namespace NavigationModule
     {
     private:
         static constexpr const char* TAG = "NavigationManager";
+        bool _pollingStarted = false;
 
     public:
         Manager() {}
@@ -40,9 +41,34 @@ namespace NavigationModule
                 ESP_LOGI(TAG, "Calibration data loaded from flash: %s", buf.c_str());
             }
         }
-        // TODO: Implement if needed
-        static void AutoStreamGPS()
+        // Starts a background task that periodically refreshes the location
+        // cache so consumers of NavigationUtils::GetCurrentLocation receive the
+        // cached fix instead of querying the sources inline. Safe to call once;
+        // subsequent calls are ignored.
+        void StartLocationPolling(uint32_t intervalMs = 15000,
+                                  uint32_t maxAgeMs   = 60000)
         {
+            if (_pollingStarted)
+            {
+                return;
+            }
+
+            NavigationModule::Utilities::SetPollIntervalMs(intervalMs);
+            NavigationModule::Utilities::SetLocationMaxAge(maxAgeMs);
+            NavigationModule::Utilities::EnableLocationCache(true);
+
+            System_Utils::registerTask([](void*) {
+                for (;;)
+                {
+                    NavigationModule::Utilities::RefreshLocationCache();
+                    vTaskDelay(pdMS_TO_TICKS(
+                        NavigationModule::Utilities::PollIntervalMs()));
+                }
+            }, "Location Poll", 4096, nullptr, 1);
+
+            _pollingStarted = true;
+            ESP_LOGI(TAG, "Started location polling (interval %u ms, max-age %u ms)",
+                     intervalMs, maxAgeMs);
         }
 
         static void SaveLocationsToFlash()

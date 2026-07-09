@@ -536,7 +536,79 @@ namespace NavigationModule
             LocationSources().push_back(source);
         }
 
+        // Returns the current location. When background polling is enabled (see
+        // NavigationManager::StartLocationPolling), this serves the most recent
+        // cached fix and returns false if that fix is older than the configured
+        // max-age. Otherwise it falls back to the legacy on-demand path that
+        // queries each registered source inline.
         static bool GetCurrentLocation(double& outLat, double& outLon)
+        {
+            if (!_PollingEnabled())
+            {
+                return _FetchFromSources(outLat, outLon);
+            }
+
+            bool ok = false;
+            if (xSemaphoreTake(_CacheMutex(), portMAX_DELAY) == pdTRUE)
+            {
+                ok = _CacheValid() &&
+                     (millis() - _CacheTimestampMs()) <= _LocationMaxAgeMs();
+                if (ok)
+                {
+                    outLat = _CachedLat();
+                    outLon = _CachedLon();
+                }
+                xSemaphoreGive(_CacheMutex());
+            }
+
+            if (ok)
+            {
+                ESP_LOGD(TAG, "Returning cached location. Lat: %f, Lon: %f", outLat, outLon);
+            }
+            else
+            {
+                ESP_LOGW(TAG, "No fresh cached location available");
+            }
+            return ok;
+        }
+
+        // Refreshes the location cache from the registered sources. Called by the
+        // background polling task; on failure the previous cache is left intact
+        // and the age check in GetCurrentLocation handles staleness.
+        static void RefreshLocationCache()
+        {
+            double lat, lon;
+            if (!_FetchFromSources(lat, lon))
+            {
+                return;
+            }
+
+            if (xSemaphoreTake(_CacheMutex(), portMAX_DELAY) == pdTRUE)
+            {
+                _CachedLat() = lat;
+                _CachedLon() = lon;
+                _CacheTimestampMs() = millis();
+                _CacheValid() = true;
+                xSemaphoreGive(_CacheMutex());
+            }
+        }
+
+        static void EnableLocationCache(bool enabled) { _PollingEnabled() = enabled; }
+        static void SetLocationMaxAge(uint32_t ms) { _LocationMaxAgeMs() = ms; }
+        static void SetPollIntervalMs(uint32_t ms) { _PollIntervalMs() = ms; }
+        static uint32_t PollIntervalMs() { return _PollIntervalMs(); }
+
+        static std::vector<GeolocationInterface*>& LocationSources()
+        {
+            static std::vector<GeolocationInterface*> sources;
+            return sources;
+        }
+
+    private:
+        // Iterates the registered location sources, returning the first success.
+        // This is the original on-demand fetch behavior, extracted so both the
+        // legacy path and the background poll task can reuse it.
+        static bool _FetchFromSources(double& outLat, double& outLon)
         {
             for (auto* src : LocationSources())
             {
@@ -551,17 +623,25 @@ namespace NavigationModule
             return false;
         }
 
-        static std::vector<GeolocationInterface*>& LocationSources()
-        {
-            static std::vector<GeolocationInterface*> sources;
-            return sources;
-        }
-
-    private:
         static CompassInterface*& _Compass()
         {
             static CompassInterface* compass = nullptr;
             return compass;
+        }
+
+        // ---- Location cache state (used when background polling is enabled) ----
+        static double& _CachedLat() { static double lat = 0.0; return lat; }
+        static double& _CachedLon() { static double lon = 0.0; return lon; }
+        static uint32_t& _CacheTimestampMs() { static uint32_t ts = 0; return ts; }
+        static bool& _CacheValid() { static bool valid = false; return valid; }
+        static bool& _PollingEnabled() { static bool enabled = false; return enabled; }
+        static uint32_t& _LocationMaxAgeMs() { static uint32_t ms = 60000; return ms; }
+        static uint32_t& _PollIntervalMs() { static uint32_t ms = 15000; return ms; }
+
+        static SemaphoreHandle_t& _CacheMutex()
+        {
+            static SemaphoreHandle_t mutex = xSemaphoreCreateMutex();
+            return mutex;
         }
 
         // Note: was Stream& (references cannot be reseated — original Init() overload was UB).
