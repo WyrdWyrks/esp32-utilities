@@ -232,9 +232,12 @@ Namespace: `NavigationModule::`
 ```cpp
 virtual bool TryGetCurrentLocation(double& outLat, double& outLon) = 0;
 virtual const char* GetMoniker() const = 0;
+bool enabled = true;
 ```
 
-Returns `true` and populates `outLat`/`outLon` (WGS84 decimal degrees) on success. `NavigationModule::Utilities::GetCurrentLocation()` iterates registered sources in order, first success wins. `GetMoniker()` returns a short identifier for the source (e.g. `"GpsSource"`, `"StaticLocation"`) for debug logging.
+Returns `true` and populates `outLat`/`outLon` (WGS84 decimal degrees) on success. `NavigationModule::Utilities::GetCurrentLocation()` iterates registered sources in order, skipping any with `enabled == false`, first success wins. `GetMoniker()` returns a short identifier for the source (e.g. `"gps"`, `"static"`) used for debug logging and as the Preferences key for `enabled`.
+
+`enabled` is loaded from the `GeoSources` Preferences namespace (keyed by moniker, default `true`) when the source is registered via `RegisterLocationSource()`. Toggle it at runtime with `NavigationModule::Utilities::SetSourceEnabled(source_or_moniker, bool)`, which updates the in-memory flag and persists the change.
 
 ### GpsGeolocationSource
 
@@ -256,8 +259,10 @@ NavigationModule::Utilities::RegisterLocationSource(&src);
 
 | Method | Description |
 |---|---|
-| `RegisterLocationSource(ptr)` | Add a geolocation source to the polling list |
-| `GetCurrentLocation(double& lat, double& lon)` | Poll sources; returns bool, first success wins |
+| `RegisterLocationSource(ptr)` | Add a geolocation source to the polling list; loads its persisted `enabled` state |
+| `GetCurrentLocation(double& lat, double& lon)` | Poll enabled sources; returns bool, first success wins |
 | `GetCurrentLocation(double& lat, double& lon, std::string& moniker)` | Same, and reports which source's moniker produced the fix |
+| `SetSourceEnabled(GeolocationInterface* src, bool)` | Enable/disable a source and persist the choice (keyed by its moniker) |
+| `SetSourceEnabled(const std::string& moniker, bool)` | Same, looked up by moniker; returns false if no registered source matches |
 | `LocationSources()` | `vector<GeolocationInterface*>&` — Meyers singleton |
 

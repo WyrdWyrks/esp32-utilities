@@ -5,6 +5,7 @@
 #include "TinyGPS++.h"
 #include "GeolocationInterface.hpp"
 #include <ezTime.h>
+#include <Preferences.h>
 #include <string>
 
 namespace
@@ -25,6 +26,10 @@ namespace NavigationModule
     class Utilities
     {
         static constexpr const char* TAG = "NavigationUtils";
+        // Dedicated Preferences namespace for geolocation source enable/disable
+        // state, keyed by GeolocationInterface::GetMoniker() (e.g. "gps", "static").
+        // NVS namespace names are capped at 15 chars.
+        static constexpr const char* GEO_SOURCE_PREFS_NAMESPACE = "GeoSources";
 
     public:
         static void Init(CompassInterface* compass)
@@ -533,7 +538,38 @@ namespace NavigationModule
         // Geolocation Source Registry
         static void RegisterLocationSource(GeolocationInterface* source)
         {
+            source->enabled = _LoadSourceEnabled(source->GetMoniker());
             LocationSources().push_back(source);
+        }
+
+        // Enables/disables a registered source and persists the choice to the
+        // GeolocationSources preferences namespace, keyed by GetMoniker().
+        static void SetSourceEnabled(GeolocationInterface* source, bool enabled)
+        {
+            if (!source)
+            {
+                return;
+            }
+
+            source->enabled = enabled;
+            _SaveSourceEnabled(source->GetMoniker(), enabled);
+        }
+
+        // Looks up a registered source by moniker (see GpsState for an example
+        // debug readout) and applies/persists the enabled state.
+        static bool SetSourceEnabled(const std::string& moniker, bool enabled)
+        {
+            for (auto* src : LocationSources())
+            {
+                if (moniker == src->GetMoniker())
+                {
+                    SetSourceEnabled(src, enabled);
+                    return true;
+                }
+            }
+
+            ESP_LOGW(TAG, "SetSourceEnabled: no registered source with moniker %s", moniker.c_str());
+            return false;
         }
 
         // Returns the current location. When background polling is enabled (see
@@ -548,8 +584,8 @@ namespace NavigationModule
         }
 
         // Overload that also reports which registered GeolocationInterface the
-        // fix came from (e.g. "GpsSource", "StaticLocation") — useful for
-        // debugging which source is actually driving the current position.
+        // fix came from (e.g. "gps", "static") — useful for debugging which
+        // source is actually driving the current position.
         static bool GetCurrentLocation(double& outLat, double& outLon, std::string& outMoniker)
         {
             if (!_PollingEnabled())
@@ -624,6 +660,11 @@ namespace NavigationModule
         {
             for (auto* src : LocationSources())
             {
+                if (!src->enabled)
+                {
+                    continue;
+                }
+
                 if (src->TryGetCurrentLocation(outLat, outLon))
                 {
                     outMoniker = src->GetMoniker();
@@ -634,6 +675,23 @@ namespace NavigationModule
 
             ESP_LOGW(TAG, "Failed to obtain location from all sources");
             return false;
+        }
+
+        static bool _LoadSourceEnabled(const std::string& moniker)
+        {
+            Preferences prefs;
+            prefs.begin(GEO_SOURCE_PREFS_NAMESPACE, true);
+            bool enabled = prefs.getBool(moniker.c_str(), true);
+            prefs.end();
+            return enabled;
+        }
+
+        static void _SaveSourceEnabled(const std::string& moniker, bool enabled)
+        {
+            Preferences prefs;
+            prefs.begin(GEO_SOURCE_PREFS_NAMESPACE, false);
+            prefs.putBool(moniker.c_str(), enabled);
+            prefs.end();
         }
 
         static CompassInterface*& _Compass()
