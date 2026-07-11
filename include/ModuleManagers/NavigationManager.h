@@ -58,10 +58,15 @@ namespace NavigationModule
             NavigationModule::Utilities::EnableLocationCache(true);
 
             System_Utils::registerTask([](void*) {
+                // Own handle registered so RequestSourceRefresh() can wake
+                // this task early (e.g. from the geolocation debug screen)
+                // instead of waiting out the full poll interval.
+                NavigationModule::Utilities::_SetPollTaskHandle(xTaskGetCurrentTaskHandle());
+
                 for (;;)
                 {
-                    NavigationModule::Utilities::RefreshLocationCache();
-                    vTaskDelay(pdMS_TO_TICKS(
+                    NavigationModule::Utilities::ServicePollCycle();
+                    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(
                         NavigationModule::Utilities::PollIntervalMs()));
                 }
             }, "Location Poll", 4096, nullptr, 1);

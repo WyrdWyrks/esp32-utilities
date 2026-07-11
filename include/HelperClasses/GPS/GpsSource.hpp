@@ -34,11 +34,13 @@ namespace NavigationModule
             if (!_lastLocation.isValid() || (_lastLocation.lat() == 0 && _lastLocation.lng() == 0))
             {
                 ESP_LOGV(_TAG, "GPS location not valid");
+                _PublishResult(false, 0, 0);
                 return false;
             }
             outLat = _lastLocation.lat();
             outLon = _lastLocation.lng();
             ESP_LOGD(_TAG, "Returning GPS location %.6f, %.6f", outLat, outLon);
+            _PublishResult(true, outLat, outLon);
             return true;
         }
 

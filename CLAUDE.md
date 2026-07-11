@@ -233,27 +233,31 @@ Namespace: `NavigationModule::`
 virtual bool TryGetCurrentLocation(double& outLat, double& outLon) = 0;
 virtual const char* GetMoniker() const = 0;
 bool enabled = true;
+virtual GeolocationResult GetLastResult() const; // has a default implementation
 ```
 
 Returns `true` and populates `outLat`/`outLon` (WGS84 decimal degrees) on success. `NavigationModule::Utilities::GetCurrentLocation()` iterates registered sources in order, skipping any with `enabled == false`, first success wins. `GetMoniker()` returns a short identifier for the source (e.g. `"gps"`, `"static"`) used for debug logging and as the Preferences key for `enabled`.
 
 `enabled` is loaded from the `GeoSources` Preferences namespace (keyed by moniker, default `true`) when the source is registered via `RegisterLocationSource()`. Toggle it at runtime with `NavigationModule::Utilities::SetSourceEnabled(source_or_moniker, bool)`, which updates the in-memory flag and persists the change.
 
-### GpsGeolocationSource
+**`GeolocationResult`** (same header) is a snapshot of a source's last result: `everPublished`, `hasFix`, `lat`, `lon`, `moniker`, `timestampMs`, and an `AgeMs()` helper. `GetLastResult()` returns a mutex-guarded copy of it — it never touches hardware/network, so it's safe to call from any task, including the UI/render thread. Implementations call the protected `_PublishResult(hasFix, lat, lon)` right before returning from `TryGetCurrentLocation` to keep it current (see `GpsSource`). `StaticLocation` overrides `GetLastResult()` entirely instead, since a constant location has no real staleness to track — it always reports itself as freshly polled.
 
-File: `include/HelperClasses/Geolocation/GpsGeolocationSource.hpp`  
-Header-only. Holds a `TinyGPSPlus&` and checks `location.isValid()` on demand.
+### GpsSource
+
+File: `include/HelperClasses/GPS/GpsSource.hpp`  
+Header-only. Holds a `TinyGPSPlus&` and a `Stream&`; also implements `TimeSourceInterface`.
 
 ```cpp
-GpsGeolocationSource src(NavigationModule::Utilities::GetGPS());
+GpsSource src(NavigationModule::Utilities::GetGPS(), Serial2);
 NavigationModule::Utilities::RegisterLocationSource(&src);
 ```
 
 ### Adding a New Geolocation Source
 
-1. Create a header-only class at `include/HelperClasses/Geolocation/<ClassName>.hpp`
+1. Create a header-only class at `include/HelperClasses/GPS/<ClassName>.hpp`
 2. Inherit `NavigationModule::GeolocationInterface`, implement `TryGetCurrentLocation(double&, double&)` and `GetMoniker() const`
-3. Register with `NavigationModule::Utilities::RegisterLocationSource()` in app init
+3. Call `_PublishResult(...)` from `TryGetCurrentLocation` so `GetLastResult()` stays current (or override `GetLastResult()` if the source has no real notion of staleness, like `StaticLocation`)
+4. Register with `NavigationModule::Utilities::RegisterLocationSource()` in app init
 
 ### NavigationModule::Utilities Geolocation API
 
@@ -264,5 +268,18 @@ NavigationModule::Utilities::RegisterLocationSource(&src);
 | `GetCurrentLocation(double& lat, double& lon, std::string& moniker)` | Same, and reports which source's moniker produced the fix |
 | `SetSourceEnabled(GeolocationInterface* src, bool)` | Enable/disable a source and persist the choice (keyed by its moniker) |
 | `SetSourceEnabled(const std::string& moniker, bool)` | Same, looked up by moniker; returns false if no registered source matches |
+| `SetVerbosePolling(bool)` | While active, the background poller walks every enabled source each cycle instead of stopping at the first success, so each source's `GetLastResult()` cache stays warm. Toggled by `GeolocationDebugState`'s `onEnter`/`onExit`. |
+| `RequestSourceRefresh(moniker)` | Queues an immediate poll of just that one source and wakes the poll task early instead of waiting out its sleep. Never calls a source directly — it only notifies the one task that does (serviced by `ServicePollCycle()`), so it can't create a second concurrent caller into a slow source. No-op before polling has started. |
 | `LocationSources()` | `vector<GeolocationInterface*>&` — Meyers singleton |
+
+### GeolocationDebugState / GeolocationDebugWindow
+
+Files: `include/HelperClasses/Window/States/GeolocationDebugState.hpp`,
+`include/HelperClasses/Window/GeolocationDebugWindow.hpp`
+
+Debug screen (menu item "Debug Geolocation") that cycles through `LocationSources()` with
+`ENC_UP`/`ENC_DOWN`, shows each source's moniker/coordinates/status/age from `GetLastResult()`,
+toggles `enabled` with `BUTTON_4`, and requests an immediate poll of just the shown source with
+`BUTTON_1`. It never polls a source itself — see the `SetVerbosePolling`/`RequestSourceRefresh`
+entries above.
 

@@ -555,8 +555,8 @@ namespace NavigationModule
             _SaveSourceEnabled(source->GetMoniker(), enabled);
         }
 
-        // Looks up a registered source by moniker (see GpsState for an example
-        // debug readout) and applies/persists the enabled state.
+        // Looks up a registered source by moniker (see GeolocationDebugState for
+        // an example debug readout) and applies/persists the enabled state.
         static bool SetSourceEnabled(const std::string& moniker, bool enabled)
         {
             for (auto* src : LocationSources())
@@ -571,6 +571,49 @@ namespace NavigationModule
             ESP_LOGW(TAG, "SetSourceEnabled: no registered source with moniker %s", moniker.c_str());
             return false;
         }
+
+        // Makes _FetchFromSources() walk every enabled source each cycle
+        // instead of stopping at the first success, so every source's own
+        // GeolocationResult cache (see GeolocationInterface::GetLastResult)
+        // stays warm while something is watching all of them (e.g. the
+        // geolocation debug screen). Toggled from that screen's onEnter/onExit.
+        static void SetVerbosePolling(bool active) { _VerbosePollingActive() = active; }
+
+        // Requests that just this one source be polled, as soon as possible,
+        // instead of waiting for its turn in the next full poll cycle. Queues
+        // the moniker and wakes the poll task — that task (and only that task)
+        // ever calls TryGetCurrentLocation, so this can't create a second
+        // concurrent caller into a slow source (e.g. WiFi geolocation). No-op
+        // before polling has started. Serviced by ServicePollCycle().
+        static void RequestSourceRefresh(const std::string& moniker)
+        {
+            _PendingSourceRefresh() = moniker;
+            if (_PollTaskHandle() != nullptr)
+            {
+                xTaskNotifyGive(_PollTaskHandle());
+            }
+        }
+
+        // Called by the poll task each time it wakes (NavigationManager::
+        // StartLocationPolling). If a single-source refresh is pending,
+        // services just that source; otherwise runs the normal full sweep.
+        static void ServicePollCycle()
+        {
+            std::string moniker = _PendingSourceRefresh();
+            _PendingSourceRefresh().clear();
+
+            if (!moniker.empty())
+            {
+                _PollSingleSource(moniker);
+                return;
+            }
+
+            RefreshLocationCache();
+        }
+
+        // Called once by the poll task (NavigationManager::StartLocationPolling)
+        // with its own handle so RequestSourceRefresh() can wake it.
+        static void _SetPollTaskHandle(TaskHandle_t handle) { _PollTaskHandle() = handle; }
 
         // Returns the current location. When background polling is enabled (see
         // NavigationManager::StartLocationPolling), this serves the most recent
@@ -653,11 +696,18 @@ namespace NavigationModule
         }
 
     private:
-        // Iterates the registered location sources, returning the first success.
-        // This is the original on-demand fetch behavior, extracted so both the
-        // legacy path and the background poll task can reuse it.
+        // Iterates the registered location sources in priority order, returning
+        // the first success. Normally stops there — but while verbose polling
+        // is active (debug screen open) it keeps going through every enabled
+        // source so each one republishes its own GeolocationResult cache, even
+        // ones that would otherwise never be reached because an earlier source
+        // keeps succeeding. This, and _PollSingleSource() below, are the only
+        // call sites for GeolocationInterface::TryGetCurrentLocation — both
+        // invoked solely from the single background poll task.
         static bool _FetchFromSources(double& outLat, double& outLon, std::string& outMoniker)
         {
+            bool found = false;
+
             for (auto* src : LocationSources())
             {
                 if (!src->enabled)
@@ -665,16 +715,50 @@ namespace NavigationModule
                     continue;
                 }
 
-                if (src->TryGetCurrentLocation(outLat, outLon))
+                double lat, lon;
+                if (src->TryGetCurrentLocation(lat, lon) && !found)
                 {
+                    found      = true;
+                    outLat     = lat;
+                    outLon     = lon;
                     outMoniker = src->GetMoniker();
                     ESP_LOGD(TAG, "Location obtained from %s. Lat: %f, Lon: %f", outMoniker.c_str(), outLat, outLon);
-                    return true;
+                }
+
+                if (found && !_VerbosePollingActive())
+                {
+                    break;
                 }
             }
 
-            ESP_LOGW(TAG, "Failed to obtain location from all sources");
-            return false;
+            if (!found)
+            {
+                ESP_LOGW(TAG, "Failed to obtain location from all sources");
+            }
+
+            return found;
+        }
+
+        // Polls exactly one registered source by moniker, for
+        // RequestSourceRefresh()/ServicePollCycle(). A no-op if the source is
+        // disabled or unregistered — the debug screen already shows "Disabled"
+        // from src->enabled without needing a fresh poll in that case.
+        static void _PollSingleSource(const std::string& moniker)
+        {
+            for (auto* src : LocationSources())
+            {
+                if (src->GetMoniker() != moniker)
+                {
+                    continue;
+                }
+
+                if (src->enabled)
+                {
+                    double lat, lon;
+                    src->TryGetCurrentLocation(lat, lon); // publishes into its own GeolocationResult cache
+                }
+                return;
+            }
         }
 
         static bool _LoadSourceEnabled(const std::string& moniker)
@@ -693,6 +777,10 @@ namespace NavigationModule
             prefs.putBool(moniker.c_str(), enabled);
             prefs.end();
         }
+
+        static bool& _VerbosePollingActive() { static bool active = false; return active; }
+        static TaskHandle_t& _PollTaskHandle() { static TaskHandle_t handle = nullptr; return handle; }
+        static std::string& _PendingSourceRefresh() { static std::string moniker; return moniker; }
 
         static CompassInterface*& _Compass()
         {
