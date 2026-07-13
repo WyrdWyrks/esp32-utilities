@@ -53,6 +53,12 @@ namespace DisplayModule
                     "!@#$%^&*()-_=+[]{}|;:',.<>?/`~\"\\ ";
         }
 
+        // Encoder click will jump to the next character in this set
+        static constexpr const char* jumpChars()
+        {
+            return  "Aa0!";
+        }
+
         EditStringState()
         {
             bindInput(InputID::BUTTON_1, "Del", [this](const InputContext &) {
@@ -75,6 +81,11 @@ namespace DisplayModule
             });
             bindInput(InputID::ENC_DOWN, "", [this](const InputContext &) {
                 _charPos = (_charPos + 1) % strlen(legalChars());
+                _showCursor = false;
+                _rebuildDrawCommands();
+            });
+            bindInput(InputID::ENC_BUTTON, "", [this](const InputContext &) {
+                _jumpToNextChar();
                 _showCursor = false;
                 _rebuildDrawCommands();
             });
@@ -150,6 +161,27 @@ namespace DisplayModule
         size_t      _maxLen     = 32;
         size_t      _charPos    = 0;    // index into LEGAL_CHARS
         bool        _showCursor = true;
+
+        // Advance _charPos to the next character (wrapping) that is a
+        // member of jumpChars(). No-op if jumpChars() is empty.
+        void _jumpToNextChar()
+        {
+            const char *legal = legalChars();
+            const char *jump  = jumpChars();
+            size_t legalLen = strlen(legal);
+            size_t jumpLen  = strlen(jump);
+            if (legalLen == 0 || jumpLen == 0) return;
+
+            for (size_t offset = 1; offset <= legalLen; ++offset)
+            {
+                size_t pos = (_charPos + offset) % legalLen;
+                if (strchr(jump, legal[pos]) != nullptr)
+                {
+                    _charPos = pos;
+                    return;
+                }
+            }
+        }
 
         void _rebuildDrawCommands()
         {

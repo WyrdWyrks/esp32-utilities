@@ -33,12 +33,15 @@ namespace DisplayModule
 
     namespace InputID
     {
-        constexpr uint8_t BUTTON_1  = 1;
+        // Core input IDs
+        constexpr uint8_t BUTTON_1  = 1; 
         constexpr uint8_t BUTTON_2  = 2;
         constexpr uint8_t BUTTON_3  = 3; // back
         constexpr uint8_t BUTTON_4  = 4; // select
         constexpr uint8_t ENC_UP    = 5;
         constexpr uint8_t ENC_DOWN  = 6;
+        // Not necessary for core functionality. Optional for power user features
+        constexpr uint8_t ENC_BUTTON  = 7;
         // Projects may define IDs starting here
         constexpr uint8_t USER_BASE = 16;
     } // namespace InputID
