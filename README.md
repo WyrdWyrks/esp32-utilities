@@ -130,7 +130,7 @@ polymorphically by a schema-hash (FNV-1a over sorted payload keys) message facto
 
 GPS + compass integration. `Utilities` (fully inline/static) owns the `TinyGPSPlus` instance, compass via
 `CompassInterface`, saved locations, and a registry of `GeolocationInterface` sources (first valid source
-wins). `Manager` handles SPIFFS persistence of saved locations and compass calibration. Feeds the LED
+wins). `Manager` handles LittleFS persistence of saved locations and compass calibration. Feeds the LED
 compass ring to point at a target coordinate. See `CLAUDE.md` for the full geolocation/source API.
 
 ### System (`SystemModule::Utilities`, alias `System_Utils`)
@@ -146,7 +146,7 @@ The device-wide service layer (header-only) every other module builds on. Provid
 
 ### Filesystem & Settings (`FilesystemModule`)
 
-SPIFFS file I/O — all data is stored as **MessagePack** — plus the device **settings system**. Settings
+LittleFS file I/O — all data is stored as **MessagePack** — plus the device **settings system**. Settings
 are typed objects (`Bool/Int/Float/String/Enum`) behind `SettingsInterface`, held in a `SettingsMap`,
 persisted to NVS via `Preferences`, and editable on-device through the Settings window or remotely via
 RPC (`RpcGetSettingsFile`, `RpcUpdateSetting(s)`). A `SettingsUpdated` event lets any module react to

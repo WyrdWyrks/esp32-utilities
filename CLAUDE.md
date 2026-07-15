@@ -53,10 +53,10 @@ Utilities + Interfaces
 |---|---|
 | `Display_Manager` | OLED orchestration, window/state stack, input routing via FreeRTOS queue |
 | `LED_Manager` | WS2812B animation, compass ring rendering, pattern registration |
-| `Settings_Manager` | JSON settings persistence (SPIFFS) |
+| `Settings_Manager` | JSON settings persistence (LittleFS) |
 | `LoraManager` | LoRa mesh networking, MessagePack serialization |
 | `NavigationModule::Manager` | GPS + compass integration, heading/distance calculation |
-| `FilesystemManager` | SPIFFS file I/O |
+| `FilesystemManager` | LittleFS file I/O |
 | `EspNowManager` | ESP-NOW protocol |
 | `RpcManager` | Remote procedure call infrastructure |
 
@@ -216,7 +216,7 @@ All GPS, compass, saved locations, and geolocation source registry functionality
 ### NavigationModule::Manager
 
 File: `include/ModuleManagers/NavigationManager.h`  
-Instantiated in the application layer. Handles initialization, saved-location persistence to SPIFFS, and calibration data loading. Backward-compat alias: `using NavigationManager = NavigationModule::Manager`.
+Instantiated in the application layer. Handles initialization, saved-location persistence to LittleFS, and calibration data loading. Backward-compat alias: `using NavigationManager = NavigationModule::Manager`.
 
 ```cpp
 // In app

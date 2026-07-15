@@ -6,7 +6,7 @@
 namespace NavigationModule
 {
     // ================================ STUB ================================
-    // Placeholder for the SPIFFS-backed BSSID -> coordinate lookup being
+    // Placeholder for the LittleFS-backed BSSID -> coordinate lookup being
     // developed separately (eventually reading a known-AP table from flash via
     // FilesystemModule). Replace the body below with the real lookup; keep the
     // signature — WiFiGeolocator depends on it.
@@ -24,7 +24,7 @@ namespace NavigationModule
             double lng;
         };
 
-        // Hardcoded sample table until the SPIFFS lookup lands. The key is the
+        // Hardcoded sample table until the LittleFS lookup lands. The key is the
         // 6-byte MAC packed into the low 48 bits of a uint64_t — just the MAC
         // hex with the colons removed: AA:BB:CC:DD:EE:FF -> 0xAABBCCDDEEFFULL.
         static const std::unordered_map<uint64_t, Coord> table = {

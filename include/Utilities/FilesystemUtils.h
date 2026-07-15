@@ -4,7 +4,7 @@
 #include "SystemUtilities.hpp"
 #include "SettingsInterface.hpp"
 #include <StreamUtils.h>
-#include <SPIFFS.h>
+#include <LittleFS.h>
 #include <string>
 #include <vector>
 #include <utility>
@@ -27,35 +27,35 @@ namespace FilesystemModule
         READ_ERROR = 4
     };
 
-    // Static class with helper functions for interacting with the SPIFFS filesystem
+    // Static class with helper functions for interacting with the LittleFS filesystem
     // Data is stored in MessagePack format
     class Utilities
     {
     public:
-        // Initializes the SPIFFS filesystem. Formats the filesystem if it doesn't exist and reboots the device
+        // Initializes the LittleFS filesystem. Formats the filesystem if it doesn't exist and reboots the device
         static void Init()
         {
-            if (!SPIFFS.begin(true))
+            if (!LittleFS.begin(true))
             {
-                ESP_LOGE(TAG, "SPIFFS Mount Failed. Rebooting...");
+                ESP_LOGE(TAG, "LittleFS Mount Failed. Rebooting...");
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 ESP.restart();
             }
 
         }
 
-        // Reads a file from the SPIFFS filesystem into a JsonDocument
+        // Reads a file from the LittleFS filesystem into a JsonDocument
         static FilesystemReturnCode ReadFile(std::string filename, JsonDocument &doc)
         {
             ESP_LOGD(TAG, "Reading file: %s", filename.c_str());
 
-            if (!SPIFFS.exists(filename.c_str()))
+            if (!LittleFS.exists(filename.c_str()))
             {
                 ESP_LOGW(TAG, "File not found: %s", filename.c_str());
                 return FilesystemReturnCode::FILE_NOT_FOUND;
             }
 
-            File file = SPIFFS.open(filename.c_str(), FILE_READ);
+            File file = LittleFS.open(filename.c_str(), FILE_READ);
 
             if (!file)
             {
@@ -86,14 +86,14 @@ namespace FilesystemModule
             return FilesystemReturnCode::FILESYSTEM_OK;
         }
 
-        // Writes a file to the SPIFFS filesystem from a JsonDocument
+        // Writes a file to the LittleFS filesystem from a JsonDocument
         static FilesystemReturnCode WriteFile(std::string filename, JsonDocument &doc)
         {
             std::string buf;
             serializeJson(doc, buf);
             ESP_LOGV(TAG, "Writing file: %s, content: %s", filename.c_str(), buf.c_str());
 
-            File file = SPIFFS.open(filename.c_str(), FILE_WRITE);
+            File file = LittleFS.open(filename.c_str(), FILE_WRITE);
             if (!file)
             {
                 return FilesystemReturnCode::WRITE_FAILED;

@@ -9,7 +9,7 @@ namespace NavigationModule
 {
     // Estimates position by scanning nearby WiFi access points and looking up
     // each one's surveyed coordinates via getWifiLocation() (a BSSID -> lat/lon
-    // table, currently stubbed, eventually SPIFFS-backed). Every scanned AP
+    // table, currently stubbed, eventually LittleFS-backed). Every scanned AP
     // found in that table contributes its coordinates to a signal-strength-
     // weighted centroid: a stronger RSSI implies the AP is closer, so it gets
     // more weight and pulls the estimate toward itself. The result is coarse

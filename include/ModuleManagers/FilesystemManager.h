@@ -4,7 +4,7 @@
 
 namespace FilesystemModule
 {
-// Manager class for the SPIFFS filesystem
+// Manager class for the LittleFS filesystem
     class Manager
     {
     private:
