@@ -3,7 +3,6 @@
 #include "Window.hpp"
 #include "States/SavedLocationsState.hpp"
 #include "States/EditStringState.hpp"
-#include "States/TrackingState.hpp"
 #include "DisplayUtilities.hpp"
 
 namespace DisplayModule
@@ -11,21 +10,19 @@ namespace DisplayModule
     // -------------------------------------------------------------------------
     // EditSavedLocationsWindow
     // -------------------------------------------------------------------------
-    // Manage saved GPS locations: scroll, rename, delete, and track.
+    // Manage saved GPS locations: scroll, rename, and delete. Tracking is now
+    // live inside SavedLocationsState — the RingPoint LED points at whichever
+    // location is selected as you scroll, so there is no separate "Track" state.
     //
     // State flow:
-    //   SavedLocationsState (list view)
+    //   SavedLocationsState (list view + live tracking)
     //     ↓ BUTTON_4 ("Edit")  — push EditStringState to rename selected location
-    //     ↓ BUTTON_2 ("Track") — push TrackingState for selected location
     //     ↓ BUTTON_1 ("Del")   — delete selected location (handled in state)
     //     ↓ BUTTON_3 ("Back")  — pop window
     //
     //   EditStringState (rename)
     //     ↓ BUTTON_2 ("Done")  — pop state with result → SavedLocationsState
     //     ↓ BUTTON_3 ("Back")  — pop state without result
-    //
-    //   TrackingState
-    //     ↓ BUTTON_3 ("Back")  — pop state → SavedLocationsState
     //
     // Usage:
     //   Utilities::pushWindow(std::make_shared<EditSavedLocationsWindow>());
@@ -37,7 +34,6 @@ namespace DisplayModule
         {
             _listState     = std::make_shared<SavedLocationsState>();
             _editStrState  = std::make_shared<EditStringState>();
-            _trackingState = std::make_shared<TrackingState>();
 
             // ----------------------------------------------------------------
             // BUTTON_3 — context-sensitive Back
@@ -50,10 +46,9 @@ namespace DisplayModule
                     {
                         Utilities::popWindow();
                     }
-                    else if (_currentState == _editStrState
-                             || _currentState == _trackingState)
+                    else if (_currentState == _editStrState)
                     {
-                        // Cancel / stop tracking → return to list (no result payload)
+                        // Cancel rename → return to list (no result payload)
                         popState();
                     }
                 });
@@ -72,23 +67,6 @@ namespace DisplayModule
                     d.inputID = ctx.inputID;
                     d.payload = _listState->buildEditPayload();
                     pushState(_editStrState, d);
-                });
-
-            // ----------------------------------------------------------------
-            // BUTTON_2 — Track selected location
-            // ----------------------------------------------------------------
-            registerInput(InputID::BUTTON_2, "Track");
-            addInputCommand(InputID::BUTTON_2,
-                [this](const InputContext &ctx)
-                {
-                    if (_currentState != _listState) return;
-                    auto payload = _listState->buildTrackPayload();
-                    if (!payload) return;
-
-                    StateTransferData d;
-                    d.inputID = ctx.inputID;
-                    d.payload = payload;
-                    pushState(_trackingState, d);
                 });
 
             // ----------------------------------------------------------------
@@ -115,7 +93,6 @@ namespace DisplayModule
     private:
         std::shared_ptr<SavedLocationsState> _listState;
         std::shared_ptr<EditStringState>     _editStrState;
-        std::shared_ptr<TrackingState>       _trackingState;
     };
 
 } // namespace DisplayModule

@@ -24,7 +24,7 @@ namespace ConnectivityModule
 
         bool EndPacket() { return _udp.endPacket() == 1; }
 
-        void Flush() { _udp.flush(); }
+        void Flush() { _udp.clear(); }
 
         bool EstablishConnection(IPAddress ip, uint16_t port)
         {

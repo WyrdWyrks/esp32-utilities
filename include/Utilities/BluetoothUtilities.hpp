@@ -77,7 +77,7 @@ namespace BluetoothModule
                 // RPC requests come in here.
                 NimBLEAttValue data = pCharacteristic->getValue();
                 uint32_t payload_size = data.length() - 1;
-                Serial.printf("[BLE] Incoming RPC packet size: %d\n", payload_size);
+                ESP_LOGI("[BLE]", "Incoming RPC packet size: %u", payload_size);
 
                 if (payload_size + _incomingPacketBufferIndex > MAX_BLE_RPC_PACKET_SIZE) {
                     // Overflow, reset buffer
