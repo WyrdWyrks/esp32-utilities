@@ -1,8 +1,12 @@
 #pragma once
 
+#include <ArduinoJson.h>
 #include <LittleFS.h>
 #include <cstdint>
 #include <cstring>
+#include <memory>
+
+#include "SystemUtilities.hpp"
 
 namespace NavigationModule
 {
@@ -60,15 +64,28 @@ namespace NavigationModule
      * Lookup: hash -> bucket; one 8-byte read of index[bucket..bucket+1]; one
      * seek + chunked memcmp scan of the bucket's records.
      *
-     * Access model: getWifiLocation() below is called only from the background
-     * location-poll task (via WiFiGeolocator), so the single shared File handle
-     * and its seek position are never touched concurrently.
+     * Access model: getWifiLocation() is called from the background
+     * location-poll task (via WiFiGeolocator) while the RPC upload handlers
+     * (RpcClearWifiGeoDb, RpcInsertWifiGeoDbBlock) run on the RPC task. Open,
+     * Close, Lookup, Clear and AppendBlock all take an internal mutex so those
+     * two tasks can't corrupt the shared File handle mid-operation.
      */
     class WifiGeoDb
     {
     public:
         // Default LittleFS path; the app may Open() a different one.
         static constexpr const char *DEFAULT_PATH = "/wifi_geo.db";
+
+        // Outcome of AppendBlock — the RPC handler needs to distinguish
+        // open failure from an offset mismatch from a short write to give
+        // the caller a useful error.
+        struct AppendOutcome
+        {
+            bool     openFailed     = false;
+            bool     offsetMismatch = false;
+            uint32_t sizeBefore     = 0; // file size just before the write
+            size_t   written        = 0; // bytes actually written this call
+        };
 
         WifiGeoDb() = default;
         ~WifiGeoDb() { Close(); }
@@ -79,78 +96,27 @@ namespace NavigationModule
 
         bool Open(const char *path)
         {
-            Close();
-
-            if (!LittleFS.exists(path))
-            {
-                ESP_LOGW(TAG, "WiFi geo DB not found: %s", path);
-                return false;
-            }
-
-            _file = LittleFS.open(path, FILE_READ);
-            if (!_file)
-            {
-                ESP_LOGE(TAG, "Failed to open WiFi geo DB: %s", path);
-                return false;
-            }
-
-            uint8_t h[HEADER_SIZE];
-            if (_file.read(h, HEADER_SIZE) != HEADER_SIZE)
-            {
-                ESP_LOGE(TAG, "WiFi geo DB truncated header: %s", path);
-                Close();
-                return false;
-            }
-
-            if (memcmp(h, "WGDB", 4) != 0 || h[4] != VERSION || h[6] != RECORD_SIZE)
-            {
-                ESP_LOGE(TAG, "WiFi geo DB bad magic/version/record size: %s", path);
-                Close();
-                return false;
-            }
-
-            _bucketBits = h[5];
-            if (_bucketBits < 1 || _bucketBits > 16)
-            {
-                ESP_LOGE(TAG, "WiFi geo DB bad bucket_bits %u", (unsigned)_bucketBits);
-                Close();
-                return false;
-            }
-
-            _count    = GetU32(h + 8);
-            _latMinE7 = (int32_t)GetU32(h + 12);
-            _lonMinE7 = (int32_t)GetU32(h + 16);
-            _scaleE7  = GetU32(h + 20);
-            if (_scaleE7 == 0)
-            {
-                ESP_LOGE(TAG, "WiFi geo DB zero scale");
-                Close();
-                return false;
-            }
-
-            _numBuckets = 1u << _bucketBits;
-            _indexOff   = HEADER_SIZE;
-            _recordsOff = HEADER_SIZE + (_numBuckets + 1) * 4;
-
-            ESP_LOGI(TAG, "Opened WiFi geo DB %s: %u records, %u buckets",
-                     path, (unsigned)_count, (unsigned)_numBuckets);
-            return true;
+            Lock lock(_mutex);
+            return _OpenUnlocked(path);
         }
 
         void Close()
         {
-            if (_file)
-            {
-                _file.close();
-            }
+            Lock lock(_mutex);
+            _CloseUnlocked();
         }
 
-        bool IsOpen() const { return (bool)_file; }
-        uint32_t Count() const { return _count; }
+        // Single-word reads — safe to skip the lock. Callers that need an
+        // atomic (IsOpen && Lookup) pair should just call Lookup, which
+        // re-checks under the lock.
+        bool     IsOpen() const { return (bool)_file; }
+        uint32_t Count() const  { return _count; }
 
         // Look up a BSSID (6 bytes, transmit order). Returns false when absent.
         bool Lookup(const uint8_t *bssid, double &lat, double &lng)
         {
+            Lock lock(_mutex);
+
             if (!_file || _count == 0)
             {
                 return false;
@@ -203,21 +169,149 @@ namespace NavigationModule
             return false;
         }
 
+        // Close the read handle and remove the file. Returns true if the file
+        // was gone (or never existed) afterwards.
+        bool Clear(const char *path)
+        {
+            Lock lock(_mutex);
+            _CloseUnlocked();
+            if (!LittleFS.exists(path))
+            {
+                return true;
+            }
+            return LittleFS.remove(path);
+        }
+
+        // Close the read handle and append data to the file (created if
+        // missing). If expectedOffset is non-null the current file size must
+        // match it before writing, otherwise the write is skipped and
+        // offsetMismatch is set. Never re-opens the read handle — the caller
+        // is expected to trigger reopen once the upload is complete.
+        AppendOutcome AppendBlock(const char    *path,
+                                  const uint8_t *data,
+                                  size_t         len,
+                                  const uint32_t *expectedOffset)
+        {
+            Lock lock(_mutex);
+            AppendOutcome out;
+            _CloseUnlocked();
+
+            File f = LittleFS.open(path, FILE_APPEND);
+            if (!f)
+            {
+                out.openFailed = true;
+                return out;
+            }
+
+            out.sizeBefore = (uint32_t)f.size();
+            if (expectedOffset && *expectedOffset != out.sizeBefore)
+            {
+                out.offsetMismatch = true;
+                f.close();
+                return out;
+            }
+
+            out.written = f.write(data, len);
+            f.close();
+            return out;
+        }
+
     private:
         static constexpr const char *TAG         = "WifiGeoDb";
         static constexpr uint32_t    HEADER_SIZE = 32;
         static constexpr uint32_t    RECORD_SIZE = 10; // 6B bssid + 2B lat + 2B lon
         static constexpr uint8_t     VERSION     = 1;
 
-        File     _file;
-        uint32_t _count      = 0;
-        uint8_t  _bucketBits = 0;
-        int32_t  _latMinE7   = 0;
-        int32_t  _lonMinE7   = 0;
-        uint32_t _scaleE7    = 0;
-        uint32_t _numBuckets = 0;
-        uint32_t _indexOff   = 0;
-        uint32_t _recordsOff = 0;
+        // RAII wrapper around the FreeRTOS mutex — mirrors the pattern used
+        // in GeolocationInterface::GetLastResult, but automated so the many
+        // early returns in Lookup can't leak the lock.
+        struct Lock
+        {
+            SemaphoreHandle_t &s;
+            Lock(SemaphoreHandle_t &sem) : s(sem) { xSemaphoreTake(s, portMAX_DELAY); }
+            ~Lock() { xSemaphoreGive(s); }
+            Lock(const Lock &)            = delete;
+            Lock &operator=(const Lock &) = delete;
+        };
+
+        bool _OpenUnlocked(const char *path)
+        {
+            _CloseUnlocked();
+
+            if (!LittleFS.exists(path))
+            {
+                ESP_LOGW(TAG, "WiFi geo DB not found: %s", path);
+                return false;
+            }
+
+            _file = LittleFS.open(path, FILE_READ);
+            if (!_file)
+            {
+                ESP_LOGE(TAG, "Failed to open WiFi geo DB: %s", path);
+                return false;
+            }
+
+            uint8_t h[HEADER_SIZE];
+            if (_file.read(h, HEADER_SIZE) != HEADER_SIZE)
+            {
+                ESP_LOGE(TAG, "WiFi geo DB truncated header: %s", path);
+                _CloseUnlocked();
+                return false;
+            }
+
+            if (memcmp(h, "WGDB", 4) != 0 || h[4] != VERSION || h[6] != RECORD_SIZE)
+            {
+                ESP_LOGE(TAG, "WiFi geo DB bad magic/version/record size: %s", path);
+                _CloseUnlocked();
+                return false;
+            }
+
+            _bucketBits = h[5];
+            if (_bucketBits < 1 || _bucketBits > 16)
+            {
+                ESP_LOGE(TAG, "WiFi geo DB bad bucket_bits %u", (unsigned)_bucketBits);
+                _CloseUnlocked();
+                return false;
+            }
+
+            _count    = GetU32(h + 8);
+            _latMinE7 = (int32_t)GetU32(h + 12);
+            _lonMinE7 = (int32_t)GetU32(h + 16);
+            _scaleE7  = GetU32(h + 20);
+            if (_scaleE7 == 0)
+            {
+                ESP_LOGE(TAG, "WiFi geo DB zero scale");
+                _CloseUnlocked();
+                return false;
+            }
+
+            _numBuckets = 1u << _bucketBits;
+            _indexOff   = HEADER_SIZE;
+            _recordsOff = HEADER_SIZE + (_numBuckets + 1) * 4;
+
+            ESP_LOGI(TAG, "Opened WiFi geo DB %s: %u records, %u buckets",
+                     path, (unsigned)_count, (unsigned)_numBuckets);
+            return true;
+        }
+
+        void _CloseUnlocked()
+        {
+            if (_file)
+            {
+                _file.close();
+            }
+        }
+
+        SemaphoreHandle_t _mutex      = xSemaphoreCreateMutex();
+        File              _file;
+        uint32_t          _count      = 0;
+        uint8_t           _bucketBits = 0;
+        int32_t           _latMinE7   = 0;
+        int32_t           _lonMinE7   = 0;
+        uint32_t          _scaleE7    = 0;
+        uint32_t          _numBuckets = 0;
+        uint32_t          _indexOff   = 0;
+        uint32_t          _recordsOff = 0;
 
         // ---------- little-endian helpers (format is LE on any host) ----------
 
@@ -267,29 +361,169 @@ namespace NavigationModule
         return WifiGeoDbInstance().Open(path);
     }
 
+    // Latch that keeps getWifiLocation() from re-attempting the lazy open on
+    // every scanned AP when the DB file is missing. Exposed as a Meyers
+    // singleton so the RPC handlers below can clear it after a clear/insert —
+    // otherwise the DB would stay unreachable until reboot after a rewrite.
+    inline bool &_WifiGeoDbAutoOpenLatch()
+    {
+        static bool attempted = false;
+        return attempted;
+    }
+
     // Interface WiFiGeolocator depends on. bssid is the 6-byte BSSID as
     // returned by WiFi.BSSID(i); lat/lng are filled when it is known.
     //
     // If the app hasn't opened the DB explicitly, this lazily opens the default
-    // path once. The one-shot latch keeps a missing DB from re-attempting the
-    // open on every scanned AP — call OpenWifiGeoDb() at init to control the
-    // path and get a clear success/failure log at boot.
+    // path once. The latch keeps a missing DB from re-attempting the open on
+    // every scanned AP — call OpenWifiGeoDb() at init to control the path and
+    // get a clear success/failure log at boot.
     inline bool getWifiLocation(uint8_t *bssid, double &lat, double &lng)
     {
         WifiGeoDb &db = WifiGeoDbInstance();
         if (!db.IsOpen())
         {
-            static bool attempted = false;
-            if (attempted)
+            if (_WifiGeoDbAutoOpenLatch())
             {
                 return false;
             }
-            attempted = true;
+            _WifiGeoDbAutoOpenLatch() = true;
             if (!db.Open(WifiGeoDb::DEFAULT_PATH))
             {
                 return false;
             }
         }
         return db.Lookup(bssid, lat, lng);
+    }
+
+    // -----------------------------------------------------------------------
+    // RPC handlers — the application layer uploads a new DB by clearing the
+    // existing file and streaming its bytes back in base64-encoded chunks.
+    // Matches the shape of the OTA RPC in SystemUtilities.hpp so the PWA can
+    // reuse the same encode + chunk + checksum path. Register with:
+    //   RpcModule::Utilities::RegisterRpc("ClearWifiGeoDb",
+    //                                     NavigationModule::RpcClearWifiGeoDb);
+    //   RpcModule::Utilities::RegisterRpc("InsertWifiGeoDbBlock",
+    //                                     NavigationModule::RpcInsertWifiGeoDbBlock);
+    //
+    // Payloads (lowercase keys, matching UploadOtaChunkRpc):
+    //   ClearWifiGeoDb        { "path"?: string }
+    //     -> { "status": "cleared" }  |  { "error": string }
+    //
+    //   InsertWifiGeoDbBlock  { "chunk": base64-string,
+    //                           "checksum": uint32,        // sum of raw bytes
+    //                           "offset"?: uint32,         // optional guard
+    //                           "path"?: string }
+    //     -> { "written": uint, "total_size": uint }
+    //     |  { "error": string, "expected_offset"?: uint }
+    //
+    // "chunk" carries raw DB bytes (header, index, or records — the ESP32 is a
+    // byte pipe; the PWA is responsible for producing a valid on-disk layout,
+    // see the format comment at the top of this file). Blocks are appended in
+    // order; if "offset" is supplied it is checked against the current file
+    // size so the caller can detect a lost/reordered chunk. On mismatch the
+    // real current size is returned in "expected_offset" and the caller should
+    // Clear + restart.
+    //
+    // Both handlers rely on WifiGeoDb's internal mutex to serialize against
+    // the poll task's Lookup calls, and clear the auto-open latch so the next
+    // getWifiLocation() call reopens the freshly written DB.
+    // -----------------------------------------------------------------------
+
+    inline void RpcClearWifiGeoDb(JsonDocument &doc)
+    {
+        const char *path = doc["path"].isNull()
+                               ? WifiGeoDb::DEFAULT_PATH
+                               : doc["path"].as<const char *>();
+
+        bool ok = WifiGeoDbInstance().Clear(path);
+        _WifiGeoDbAutoOpenLatch() = false;
+
+        doc.clear();
+        if (ok)
+        {
+            doc["status"] = "cleared";
+        }
+        else
+        {
+            doc["error"] = "remove failed";
+        }
+    }
+
+    inline void RpcInsertWifiGeoDbBlock(JsonDocument &doc)
+    {
+        if (doc["chunk"].isNull())
+        {
+            doc.clear();
+            doc["error"] = "Missing or invalid 'chunk'";
+            return;
+        }
+        auto b64 = doc["chunk"].as<std::string>();
+
+        if (doc["checksum"].isNull())
+        {
+            doc.clear();
+            doc["error"] = "Missing or invalid 'checksum'";
+            return;
+        }
+        auto checksum = doc["checksum"].as<uint32_t>();
+
+        bool     hasOffset      = !doc["offset"].isNull();
+        uint32_t expectedOffset = hasOffset ? doc["offset"].as<uint32_t>() : 0;
+
+        const char *path = doc["path"].isNull()
+                               ? WifiGeoDb::DEFAULT_PATH
+                               : doc["path"].as<const char *>();
+
+        size_t b64Len   = b64.size();
+        size_t binLen   = (b64Len * 3) / 4; // upper bound; DecodeBase64 returns actual
+        std::unique_ptr<uint8_t[]> buffer(new uint8_t[binLen]);
+
+        int actualLen = System_Utils::DecodeBase64(b64.c_str(), buffer.get(), binLen);
+        if (actualLen <= 0)
+        {
+            doc.clear();
+            doc["error"] = "Base64 decode failed";
+            return;
+        }
+
+        uint32_t calculatedChecksum = 0;
+        for (int i = 0; i < actualLen; i++)
+        {
+            calculatedChecksum += buffer[i];
+        }
+        if (calculatedChecksum != checksum)
+        {
+            doc.clear();
+            doc["error"] = "CRC mismatch";
+            return;
+        }
+
+        auto outcome = WifiGeoDbInstance().AppendBlock(
+            path, buffer.get(), (size_t)actualLen,
+            hasOffset ? &expectedOffset : nullptr);
+
+        _WifiGeoDbAutoOpenLatch() = false;
+
+        doc.clear();
+        if (outcome.openFailed)
+        {
+            doc["error"] = "open failed";
+        }
+        else if (outcome.offsetMismatch)
+        {
+            doc["error"]           = "offset mismatch";
+            doc["expected_offset"] = outcome.sizeBefore;
+        }
+        else if (outcome.written != (size_t)actualLen)
+        {
+            doc["error"]   = "short write";
+            doc["written"] = (uint32_t)outcome.written;
+        }
+        else
+        {
+            doc["written"]    = (uint32_t)outcome.written;
+            doc["total_size"] = outcome.sizeBefore + (uint32_t)outcome.written;
+        }
     }
 }
