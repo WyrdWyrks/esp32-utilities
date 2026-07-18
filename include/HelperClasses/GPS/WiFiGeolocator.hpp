@@ -8,9 +8,9 @@
 namespace NavigationModule
 {
     // Estimates position by scanning nearby WiFi access points and looking up
-    // each one's surveyed coordinates via getWifiLocation() (a BSSID -> lat/lon
-    // table, currently stubbed, eventually LittleFS-backed). Every scanned AP
-    // found in that table contributes its coordinates to a signal-strength-
+    // each one's surveyed coordinates via WifiGeoDb::getWifiLocation() (a
+    // LittleFS-backed BSSID -> lat/lon database). Every scanned AP found in
+    // that database contributes its coordinates to a signal-strength-
     // weighted centroid: a stronger RSSI implies the AP is closer, so it gets
     // more weight and pulls the estimate toward itself. The result is coarse
     // (tens to hundreds of metres) but works indoors and in urban canyons
@@ -83,7 +83,7 @@ namespace NavigationModule
                 // until scanDelete() below.
                 double apLat = 0.0;
                 double apLon = 0.0;
-                if (!getWifiLocation(WiFi.BSSID(i), apLat, apLon))
+                if (!WifiGeoDb::getWifiLocation(WiFi.BSSID(i), apLat, apLon))
                 {
                     continue; // unknown AP
                 }
