@@ -2,6 +2,7 @@
 
 #include "GeolocationInterface.hpp"
 #include "WiFiLocationLookup.hpp"
+#include "RadioUtils.h"
 #include <WiFi.h>
 #include <cmath>
 
@@ -56,6 +57,19 @@ namespace NavigationModule
 
         bool TryGetCurrentLocation(double& outLat, double& outLon) override
         {
+            // Borrow the radio only for the scan, then power it back down so
+            // the device keeps WiFi off whenever geolocation isn't scanning.
+            // If WiFi is already up for something else (RPC session,
+            // provisioning), skip this cycle instead of disturbing it — the
+            // cached fix ages out and we retry on the next poll.
+            ScanRadioGuard radioGuard;
+            if (!radioGuard.owned)
+            {
+                ESP_LOGD(_TAG, "Radio in use elsewhere; skipping WiFi scan this cycle");
+                _PublishResult(false, 0, 0);
+                return false;
+            }
+
             int16_t n = WiFi.scanNetworks(false /*async*/, true /*show_hidden*/);
             if (n < 0)
             {
@@ -122,6 +136,17 @@ namespace NavigationModule
         const char* GetMoniker() const override { return "wifi"; }
 
     private:
+        // Powers the radio off on every exit path once the scan is done. Its
+        // `owned` flag records whether the radio was actually acquired here
+        // (false if WiFi was already in use elsewhere, in which case we leave
+        // it untouched).
+        struct ScanRadioGuard
+        {
+            bool owned;
+            ScanRadioGuard() : owned(ConnectivityModule::RadioUtils::TryAcquireForScan()) {}
+            ~ScanRadioGuard() { if (owned) { ConnectivityModule::RadioUtils::ReleaseAfterScan(); } }
+        };
+
         // Log-distance path-loss model: d = 10^((refRssi - rssi) / (10 * n)).
         // At rssi == refRssi this yields 1 m; weaker signals yield larger d.
         double _EstimateDistanceMeters(int rssi) const

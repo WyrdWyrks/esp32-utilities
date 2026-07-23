@@ -33,9 +33,56 @@ namespace ConnectivityModule
             WiFi.setSleep(false);
         }
 
+        // NOTE: This does NOT power the radio down. It only enables WiFi
+        // modem-sleep (light doze between DTIM beacons) and marks the tracked
+        // state OFF; the PHY stays powered. For a real power-down that stops
+        // the PHY, use ReleaseAfterScan() (scan borrowing) or
+        // StopAccessPoint()/DeinitializeEspNow(), which call WiFi.mode(WIFI_OFF).
         static void DisableRadio()
         {
             WiFi.setSleep(true);
+            RadioState() = RADIO_STATE_OFF;
+        }
+
+        // ------------------------------------------------------------------
+        // Power-managed scan borrowing
+        // ------------------------------------------------------------------
+        // Keeps the radio fully powered down whenever nothing needs it. A
+        // caller that needs WiFi only momentarily (e.g. a geolocation scan)
+        // borrows it with TryAcquireForScan(), does its work, then calls
+        // ReleaseAfterScan() to power the PHY back off. If a long-lived owner
+        // already has WiFi up (RPC AP/STA session, provisioning, ESP-NOW), the
+        // borrow is declined so the scan never disturbs an active connection.
+
+        // Brings STA up and returns true if the radio was free; returns false
+        // and changes nothing if WiFi is already in use elsewhere (the caller
+        // should skip its scan this cycle).
+        static bool TryAcquireForScan()
+        {
+            if (WiFi.getMode() != WIFI_MODE_NULL)
+            {
+                return false; // radio already owned (AP/STA/provisioning/ESP-NOW)
+            }
+
+            _ScanOwnsRadio() = true;
+            WiFi.mode(WIFI_STA); // scanNetworks() does this too; explicit here
+            RadioState() = RADIO_STATE_STA;
+            return true;
+        }
+
+        // Powers the radio fully off, but only if a prior TryAcquireForScan()
+        // is what brought it up. No-op otherwise, so it is safe to call on
+        // every scan-exit path.
+        static void ReleaseAfterScan()
+        {
+            if (!_ScanOwnsRadio())
+            {
+                return;
+            }
+
+            _ScanOwnsRadio() = false;
+            WiFi.disconnect(true); // tear down the STA interface
+            WiFi.mode(WIFI_OFF);   // real power-down (cf. DisableRadio modem-sleep)
             RadioState() = RADIO_STATE_OFF;
         }
 
@@ -216,7 +263,17 @@ namespace ConnectivityModule
             WiFi.softAPdisconnect();
             DisableRadio();
             WiFi.mode(WIFI_OFF);
-            RadioState() = RADIO_STATE_OFF;       
+            RadioState() = RADIO_STATE_OFF;
+        }
+
+    private:
+        // True while a geolocation scan (and only a scan) is holding the radio,
+        // so ReleaseAfterScan() only powers down what TryAcquireForScan()
+        // powered up.
+        static bool &_ScanOwnsRadio()
+        {
+            static bool owns = false;
+            return owns;
         }
     };
 }
