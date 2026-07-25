@@ -74,6 +74,12 @@ void LED_Utils::configurePattern(int patternID, JsonDocument &config)
         return;
     }
 
+    if (!registeredPatterns[patternID].enabled)
+    {
+        ESP_LOGV(TAG, "LED_Utils::configurePattern: Skipping disabled pattern with ID %d", patternID);
+        return;
+    }
+
     std::string configStr;
     serializeJson(config, configStr);
     ESP_LOGV(TAG, "LED_Utils::configurePattern: Configuring pattern with ID %d with config: %s", patternID, configStr.c_str());
