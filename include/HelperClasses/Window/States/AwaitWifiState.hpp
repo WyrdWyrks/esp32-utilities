@@ -129,18 +129,7 @@ namespace DisplayModule
 
             auto mode = ConnectivityModule::Utilities::ProvisioningMode();
 
-            if (mode == ConnectivityModule::WIFI_PROV_MODE_ESP_NOW)
-            {
-                addDrawCommand(std::make_shared<TextDrawCommand>(
-                    "No WiFi Found",
-                    TextFormat{ TextAlignH::CENTER, TextAlignV::LINE, 2 }
-                ));
-                addDrawCommand(std::make_shared<TextDrawCommand>(
-                    "Awaiting SmartConfig",
-                    TextFormat{ TextAlignH::CENTER, TextAlignV::LINE, 3 }
-                ));
-            }
-            else if (mode == ConnectivityModule::WIFI_PROV_MODE_TEMP_AP)
+            if (mode == ConnectivityModule::WIFI_PROV_MODE_TEMP_AP)
             {
                 addDrawCommand(std::make_shared<TextDrawCommand>(
                     "Configure WiFi",

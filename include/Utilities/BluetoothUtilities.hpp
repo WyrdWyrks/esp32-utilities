@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include "ArduinoJson.h"
 #include "RpcManager.h"
+#include "RadioUtils.h"
 
 namespace BluetoothModule
 {
@@ -19,6 +20,10 @@ namespace BluetoothModule
         inline bool gBluetoothConnected = false;
         inline int gBluetoothPin = 0;
         inline bool gBluetoothPaired = false;
+        // Whether the NimBLE stack is currently built. Balances
+        // initBluetooth()/deinitBluetooth() so re-entering the BT screen
+        // doesn't rebuild the server on top of the old one.
+        inline bool gBleInitialized = false;
 
         inline std::string &DeviceName()
         {
@@ -173,9 +178,18 @@ public:
     {
         using namespace BluetoothModule::detail;
 
-        // Can't have WiFi and BT active
-        WiFi.disconnect(true);  // Disconnect from the network
-        WiFi.mode(WIFI_OFF);    // Switch WiFi off
+        // Single shared radio: hand ownership to Bluetooth. This powers WiFi
+        // down, waits out any in-flight geolocation scan, and records
+        // RADIO_STATE_BT so background scans defer while BLE is up.
+        ConnectivityModule::RadioUtils::AcquireForBluetooth();
+
+        if (gBleInitialized)
+        {
+            // Re-entering without a teardown: the stack is already built, so
+            // just make sure we're advertising again.
+            BLEDevice::startAdvertising();
+            return;
+        }
 
         ESP_LOGI("BluetoothUtilities", "Initializing Bluetooth as %s...", _DeviceName().c_str());
 
@@ -188,8 +202,22 @@ public:
         // State that we can display a PIN code for pairing, but no input supported.
         BLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);
 
+        // Callback objects are static so they persist across deinit/reinit
+        // cycles without per-visit heap churn. NimBLE's ownership rules differ
+        // by type, and both must be kept from delete-ing these static (non-heap)
+        // objects on deinit:
+        //   - NimBLEServer deletes its callbacks by default (setCallbacks'
+        //     deleteCallbacks arg defaults to true) — so pass false below, or
+        //     BLEDevice::deinit() would delete a static object and corrupt the
+        //     heap (crash on leaving the BT screen).
+        //   - NimBLECharacteristic never deletes its callbacks, so the RPC
+        //     callback is safe as-is (and static avoids leaking its ~8 KB
+        //     buffers on every visit).
+        static SystemBLEServer serverCallbacks;
+        static RpcCharacteristicCallbacks rpcCallbacks;
+
         BLEServer* pServer = BLEDevice::createServer();
-        pServer->setCallbacks(new SystemBLEServer());
+        pServer->setCallbacks(&serverCallbacks, false); // false: don't delete our static object
 
         BLEService* pService = pServer->createService(DEGEN_SERVICE_UUID);
 
@@ -202,7 +230,7 @@ public:
             NIMBLE_PROPERTY::READ_AUTHEN |
             NIMBLE_PROPERTY::WRITE_AUTHEN
         );
-        pRpcCharacteristic->setCallbacks(new RpcCharacteristicCallbacks());
+        pRpcCharacteristic->setCallbacks(&rpcCallbacks);
 
         // NimBLEService::start() is deprecated and has no effect; services are
         // started automatically when the server starts advertising.
@@ -215,6 +243,31 @@ public:
         pAdvertising->setAppearance(BLE_APPEARANCE_GENERIC_WATCH);
 
         BLEDevice::startAdvertising();
+
+        gBleInitialized = true;
+    }
+
+    // Tears the NimBLE stack down and hands the radio back to the state
+    // machine (RADIO_STATE_BT -> OFF), so WiFi geolocation and radio-off idle
+    // resume. Called when leaving the BT screen (BtState::onExit).
+    static void deinitBluetooth()
+    {
+        using namespace BluetoothModule::detail;
+
+        if (gBleInitialized)
+        {
+            ESP_LOGI("BluetoothUtilities", "Deinitializing Bluetooth");
+            // true = free the server, services, characteristics and
+            // advertising objects created in initBluetooth().
+            BLEDevice::deinit(true);
+            gBleInitialized = false;
+        }
+
+        gBluetoothConnected = false;
+        gBluetoothPaired    = false;
+        gBluetoothPin       = 0;
+
+        ConnectivityModule::RadioUtils::ReleaseBluetooth();
     }
 
     static bool bluetoothConnected()

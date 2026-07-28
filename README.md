@@ -38,7 +38,7 @@ which build on **Utilities** and **Interfaces**.
 ```
 Application Project
     ↓
-Module Managers   (Display, LED, Lora, Navigation, Filesystem, EspNow, Rpc)
+Module Managers   (Display, LED, Lora, Navigation, Filesystem, Rpc)
     ↓
 Helper Classes    (Windows, States, Layers, LED Patterns, Messages, Draw Commands)
     ↓
@@ -154,12 +154,13 @@ changes (e.g. `BluetoothUtilities::SettingsUpdated`, timezone updates).
 
 ### Connectivity & Radio (`ConnectivityModule`)
 
-WiFi / ESP-NOW transport and provisioning:
-- **`RadioUtils`** — a single-owner WiFi radio state machine (`OFF / STA / AP / ESP-NOW / BT`) with helpers
-  for SmartConfig, AP mode, ESP-NOW init, and channel control (the ESP32 radio can only be in one mode at
-  a time).
-- **`EspNowManager`** — ESP-NOW peer messaging; `ConnectivityUtils` layers an RPC-over-ESP-NOW queue on top.
-- **WiFi provisioning** — none / ESP-NOW / temporary-AP modes, driven from settings.
+WiFi transport and provisioning:
+- **`RadioUtils`** — a single-owner radio state machine (`OFF / STA / AP / BT`) that arbitrates the shared
+  2.4 GHz radio between WiFi and Bluetooth. Callers borrow the radio (`TryAcquireForScan`,
+  `AcquireForWiFi`, `AcquireForBluetooth`) and release it (`ReleaseAfterScan`, `ReleaseWiFi`,
+  `ReleaseBluetooth`); a mutex serialises ownership so a background geolocation scan never collides with a
+  WiFi session or BLE (the ESP32 radio can only be in one mode at a time).
+- **WiFi provisioning** — none / temporary-AP modes, driven from settings.
 - **`IpUtils`** — registry of `NetworkStreamInterface` streams (`WiFiTcpStream`, `WiFiUdpStream`,
   `TcpConnectionBroadcast`) and the glue that binds an RPC channel to a network stream.
 
@@ -196,7 +197,7 @@ esp32-utilities/
 │   ├── Interfaces/                # Pluggable interfaces (TimeSource, Geolocation, Compass,
 │   │                              #   LoraDriver, NetworkStream, Layer, Window, DrawCommand, …)
 │   ├── ModuleManagers/            # Top-level managers (Display, LED, Lora, Navigation,
-│   │                              #   Filesystem, EspNow, Rpc)
+│   │                              #   Filesystem, Rpc)
 │   ├── HelperClasses/
 │   │   ├── DrawCommands/          # OLED drawing primitives
 │   │   ├── LED/Patterns/          # LED animation patterns

@@ -57,7 +57,6 @@ Utilities + Interfaces
 | `LoraManager` | LoRa mesh networking, MessagePack serialization |
 | `NavigationModule::Manager` | GPS + compass integration, heading/distance calculation |
 | `FilesystemManager` | LittleFS file I/O |
-| `EspNowManager` | ESP-NOW protocol |
 | `RpcManager` | Remote procedure call infrastructure |
 
 ### Key Patterns
