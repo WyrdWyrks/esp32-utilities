@@ -43,6 +43,14 @@ public:
         // Self-register task handle so the DIO0 ISR and SendQueueTask can notify us
         _ReceiveTaskHandle = xTaskGetCurrentTaskHandle();
 
+        // Publish it so a channel change from the settings task can wake us
+        LoraModule::Utilities::RadioTaskHandle() = _ReceiveTaskHandle;
+
+        // Settings are processed before this task exists, so the channel chosen
+        // at boot is already sitting in the request slot — apply it before the
+        // first RX rather than waiting for the next settings change.
+        _ApplyPendingChannel();
+
         // Enter continuous receive mode — safe here because handle is now set
         _Driver->StartReceiving();
 
@@ -180,6 +188,12 @@ public:
                 vTaskDelay(pdMS_TO_TICKS(AFTER_SEND_BLOCK_TIME_MS));
             }
 
+            // Apply a channel change requested from the settings task. Done here
+            // rather than at the top of the loop so a packet that arrived on the
+            // old channel is still processed, and so the StartReceiving() below
+            // is what latches the new frequency.
+            _ApplyPendingChannel();
+
             // Re-enter continuous receive mode for the next packet
             _Driver->StartReceiving();
         }
@@ -257,6 +271,20 @@ public:
     }
 
 protected:
+    // Retunes the radio if a channel change is pending. Radio task only —
+    // it is the sole owner of the radio's registers and mode transitions.
+    void _ApplyPendingChannel()
+    {
+        int channel = LoraModule::Utilities::TakePendingChannel();
+        if (channel == 0) { return; }
+
+        uint32_t hz = LoraModule::ChannelToHz(channel);
+        ESP_LOGI(TAG, "Switching to channel %d (%u Hz)", channel, hz);
+
+        _Driver->SetFrequency(hz);
+        LoraModule::Utilities::ActiveChannel() = channel;
+    }
+
     bool ShouldMessageBeForwarded(uint32_t senderID, uint32_t msgID, uint8_t bouncesLeft)
     {
         if (senderID == System_Utils::DeviceID) { return false; }

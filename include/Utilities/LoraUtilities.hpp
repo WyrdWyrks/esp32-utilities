@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ArduinoJson.h>
+#include <atomic>
 #include <cstring>
 #include <map>
 #include <unordered_map>
@@ -9,6 +10,7 @@
 #include <string>
 
 #include "LoraMessageInterface.hpp"
+#include "LoraChannelPlan.h"
 #include "EncryptionUtils.hpp"
 #include "EventHandler.h"
 #include "SystemUtilities.hpp"
@@ -306,14 +308,30 @@ namespace LoraModule
         static constexpr const char* SETTING_LORA_PASSWORD = "Channel Key";
         static constexpr size_t      LORA_PASSWORD_MAX_LEN = 21;
 
+        // Distinct from SETTING_LORA_PASSWORD above: that one is the encryption
+        // "chatroom", this one is the radio frequency. Both are short enough to
+        // survive NVS's 15-character key limit.
+        static constexpr const char* SETTING_LORA_CHANNEL = "LoRa Channel";
+
         static void GenerateDefaultSettings(std::vector<std::shared_ptr<FilesystemModule::SettingsInterface>>& settings)
         {
             auto pw = std::make_shared<FilesystemModule::StringSetting>(
                 SETTING_LORA_PASSWORD, "", LORA_PASSWORD_MAX_LEN);
             settings.push_back(pw);
 
-            auto frequency = std::make_shared<FilesystemModule::FloatSetting>("Frequency", 914.9, 902.3, 914.9, 0.2);
-            settings.push_back(frequency);
+            // Replaces the old "Frequency" float, whose 0.2 MHz steps were
+            // meaningless at 500 kHz bandwidth. See LoraChannelPlan.h.
+            std::vector<std::string> channelLabels;
+            std::vector<int>         channelValues;
+            for (int ch = 1; ch <= LORA_CHANNEL_COUNT; ++ch)
+            {
+                channelLabels.push_back(ChannelLabel(ch));
+                channelValues.push_back(ch);
+            }
+            auto channel = std::make_shared<FilesystemModule::EnumSetting>(
+                SETTING_LORA_CHANNEL, LORA_CHANNEL_DEFAULT,
+                std::move(channelLabels), std::move(channelValues));
+            settings.push_back(channel);
 
             auto broadcastAttempts = std::make_shared<FilesystemModule::IntSetting>("Num Broadcasts", 3, 1, 5, 1);
             settings.push_back(broadcastAttempts);
@@ -334,6 +352,57 @@ namespace LoraModule
 
             UserName() = settings["User Name"].as<std::string>();
             DefaultSendAttempts() = settings["Num Broadcasts"] | (uint8_t)3;
+
+            RequestChannel(settings[SETTING_LORA_CHANNEL] | LORA_CHANNEL_DEFAULT);
+        }
+
+        // ---------------------------------------------------------------------
+        // Channel selection
+        // ---------------------------------------------------------------------
+        // Radio registers are only ever touched from the Manager's radio task,
+        // but settings updates arrive on the display or RPC task. So a channel
+        // change is published here and applied by the radio task — this records
+        // the request and pokes the task awake.
+        //
+        // At boot the settings pass runs before the radio task exists (the
+        // notify below no-ops against a null handle), which is why RadioTask
+        // also drains the request once on entry.
+
+        static void RequestChannel(int channel)
+        {
+            if (!IsValidChannel(channel))
+            {
+                ESP_LOGW(TAG, "Ignoring out-of-range channel %d", channel);
+                return;
+            }
+
+            if (channel == ActiveChannel()) { return; }
+
+            PendingChannel().store(channel);
+
+            auto handle = RadioTaskHandle();
+            if (handle != nullptr) { xTaskNotifyGive(handle); }
+        }
+
+        // Returns the channel to switch to, or 0 when nothing is pending.
+        // Clears the request. Called only by the radio task.
+        static int TakePendingChannel()
+        {
+            return PendingChannel().exchange(0);
+        }
+
+        // The channel the radio is actually tuned to.
+        static int& ActiveChannel()
+        {
+            static int ch = LORA_CHANNEL_DEFAULT;
+            return ch;
+        }
+
+        // Published by Manager::RadioTask so RequestChannel can wake it.
+        static TaskHandle_t& RadioTaskHandle()
+        {
+            static TaskHandle_t h = nullptr;
+            return h;
         }
 
         // Reads sender / msgID / bouncesLeft from ANY message format (encrypted or plaintext)
@@ -388,6 +457,12 @@ namespace LoraModule
         }
 
     private:
+        static std::atomic<int>& PendingChannel()
+        {
+            static std::atomic<int> ch{0};
+            return ch;
+        }
+
         static bool& EncryptionEnabled()
         {
             static bool e = false;
