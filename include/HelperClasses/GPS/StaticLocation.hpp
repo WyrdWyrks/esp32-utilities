@@ -9,6 +9,17 @@ namespace NavigationModule
     public:
         StaticLocation(double lat, double lon) : _lat(lat), _lon(lon) {}
 
+        // The reported position is user-configurable, so it can change after
+        // construction (see the "Static Lat"/"Static Lon" settings).
+        void SetLocation(double lat, double lon)
+        {
+            _lat = lat;
+            _lon = lon;
+        }
+
+        double GetLatitude() const { return _lat; }
+        double GetLongitude() const { return _lon; }
+
         bool TryGetCurrentLocation(double& outLat, double& outLon) override
         {
             outLat = _lat;

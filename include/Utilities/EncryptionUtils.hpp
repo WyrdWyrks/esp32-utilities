@@ -3,7 +3,9 @@
 #include <mbedtls/aes.h>
 #include <mbedtls/pkcs5.h>
 #include <mbedtls/md.h>
+#include <mbedtls/ctr_drbg.h>
 #include <esp_random.h>
+#include <esp_log.h>
 #include <string>
 #include <cstring>
 #include <algorithm>
@@ -31,10 +33,54 @@ public:
             KEY_SIZE, key);
     }
 
-    // Fills iv[IV_SIZE] with cryptographically random bytes from the ESP32 hardware RNG.
+    // Seeds the CTR_DRBG that GenerateIV() draws from. Must be called once at
+    // startup, from the window where a hardware entropy source is actually
+    // running — either the RF subsystem is up, or bootloader_random_enable()
+    // is in effect. esp_random() is only true-random under those conditions;
+    // outside them it degrades to pseudo-random, and this device spends most
+    // of its life with the radio off. Seeding once while entropy is real gives
+    // unpredictable IVs forever after without touching the radio again.
+    //
+    // Returns false if seeding failed, in which case GenerateIV() falls back
+    // to esp_random() directly.
+    static bool SeedRng(const std::string& personalization = "")
+    {
+        mbedtls_ctr_drbg_init(&_Drbg());
+
+        int rc = mbedtls_ctr_drbg_seed(
+            &_Drbg(), _HardwareEntropy, nullptr,
+            reinterpret_cast<const uint8_t*>(personalization.c_str()),
+            personalization.size());
+
+        if (rc != 0)
+        {
+            ESP_LOGE("EncryptionUtils", "mbedtls_ctr_drbg_seed failed: -0x%04X", -rc);
+            mbedtls_ctr_drbg_free(&_Drbg());
+            _Seeded() = false;
+            return false;
+        }
+
+        _Seeded() = true;
+        return true;
+    }
+
+    // Fills iv[IV_SIZE] with cryptographically random bytes.
+    //
+    // Not thread-safe: CONFIG_MBEDTLS_THREADING_C is off, so the DRBG has no
+    // internal lock. Only the LoRa send task draws from it (GenerateIV is
+    // reached solely via SerializeMessage from SendQueueTask). Calling this
+    // from a second task means adding a mutex here.
     static void GenerateIV(uint8_t iv[IV_SIZE])
     {
         static_assert(IV_SIZE % 4 == 0, "IV_SIZE must be a multiple of 4");
+
+        if (_Seeded() && mbedtls_ctr_drbg_random(&_Drbg(), iv, IV_SIZE) == 0)
+        {
+            return;
+        }
+
+        // Unseeded or the draw failed. Still better than a predictable IV, and
+        // true-random whenever the radio happens to be up.
         for (size_t i = 0; i < IV_SIZE; i += 4)
         {
             uint32_t r = esp_random();
@@ -94,4 +140,27 @@ public:
 
 private:
     static constexpr size_t MAX_PAYLOAD_SIZE = 528;
+
+    static mbedtls_ctr_drbg_context& _Drbg()
+    {
+        static mbedtls_ctr_drbg_context drbg;
+        return drbg;
+    }
+
+    static bool& _Seeded()
+    {
+        static bool seeded = false;
+        return seeded;
+    }
+
+    // Entropy callback for the initial seed. esp_fill_random() is the same
+    // source ESP-IDF wires into mbedtls by default; the quality of what it
+    // returns is entirely down to the caller opening an entropy window first
+    // (see SeedRng).
+    static int _HardwareEntropy(void* ctx, unsigned char* out, size_t len)
+    {
+        (void)ctx;
+        esp_fill_random(out, len);
+        return 0;
+    }
 };
