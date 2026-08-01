@@ -536,9 +536,9 @@ namespace NavigationModule
         // }
 
         // Geolocation Source Registry
-        static void RegisterLocationSource(GeolocationInterface* source)
+        static void RegisterLocationSource(GeolocationInterface* source, bool enabledDefault = true)
         {
-            source->enabled = _LoadSourceEnabled(source->GetMoniker());
+            source->enabled = _LoadSourceEnabled(source->GetMoniker(), enabledDefault);
             LocationSources().push_back(source);
         }
 
@@ -761,11 +761,11 @@ namespace NavigationModule
             }
         }
 
-        static bool _LoadSourceEnabled(const std::string& moniker)
+        static bool _LoadSourceEnabled(const std::string& moniker, bool enabledDefault)
         {
             Preferences prefs;
             prefs.begin(GEO_SOURCE_PREFS_NAMESPACE, true);
-            bool enabled = prefs.getBool(moniker.c_str(), true);
+            bool enabled = prefs.getBool(moniker.c_str(), enabledDefault    );
             prefs.end();
             return enabled;
         }
