@@ -12,6 +12,7 @@ namespace
     const size_t  NUM_REBROADCAST_ATTEMPTS = 1;
     const size_t  MIN_SEND_DELAY_MS        = 100;
     const size_t  MAX_SEND_DELAY_MS        = 3000;
+    const size_t  RELAY_JITTER_MS          = 500;
     const uint8_t MAX_BOUNCES_LEFT         = 5;
 }
 
@@ -63,7 +64,7 @@ public:
             uint8_t buffer[MAX_MESSAGE_SIZE];
             size_t  len = 0;
 
-            if (_Driver->ReceiveMessage(buffer, len, 0))
+            if (_Driver->ReceiveMessage(buffer, sizeof(buffer), len, 0))
             {
                 ESP_LOGI(TAG, "Received LoRa message: %d bytes", len);
                 // Phase 1: Extract base fields for routing — works for any message format,
@@ -134,6 +135,13 @@ public:
                             int rssi = _Driver->PacketRssi();
                             int clampedRssi = rssi < -130 ? -130 : (rssi > -80 ? -80 : rssi);
                             uint32_t rssiDelayMs = static_cast<uint32_t>((clampedRssi + 130) * 2000 / 50);
+
+                            // Jitter, because the RSSI term alone is deterministic and
+                            // saturates: every node closer than about -80 dBm clamps to
+                            // the same value and so waits exactly the same time, then
+                            // relays simultaneously. That is the common case for a group
+                            // of devices sitting together.
+                            rssiDelayMs += static_cast<uint32_t>(rand() % RELAY_JITTER_MS);
 
                             ESP_LOGI(TAG, "Relay wait %u ms (RSSI %d dBm) — bouncesLeft %d -> %d",
                                      rssiDelayMs, rssi, routeBouncesLeft, routeBouncesLeft - 1);
