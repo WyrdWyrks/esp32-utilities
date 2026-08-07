@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <functional>
+#include <iterator>
 #include <unordered_map>
 #include <vector>
 #include <memory>
@@ -75,6 +76,39 @@ namespace SystemModule
         static void shutdownBatteryWarning()
         {
             systemShutdown.Invoke();
+        }
+
+        // ---------------------------------------------------------------------
+        // Diagnostics
+        // ---------------------------------------------------------------------
+        // The diagnostics screen (DisplayModule::DiagnosticsState) can only
+        // report what this library knows about — heap, fragmentation, stack.
+        // Anything hardware-specific (PMIC rails, fuel gauge, radio stats) lives
+        // in the application layer, so the app registers a provider here and the
+        // screen appends whatever lines it returns.
+        //
+        // Providers are called from the display task on every refresh, so keep
+        // them cheap and non-blocking. Each string is one 8px display line;
+        // budget ~21 characters at text size 1 on a 128px-wide panel.
+        using DiagnosticsProvider = std::function<std::vector<std::string>()>;
+
+        static void registerDiagnosticsProvider(DiagnosticsProvider fn)
+        {
+            if (fn)
+                _diagnosticsProviders.push_back(std::move(fn));
+        }
+
+        static std::vector<std::string> collectDiagnostics()
+        {
+            std::vector<std::string> lines;
+            for (auto &provider : _diagnosticsProviders)
+            {
+                auto providerLines = provider();
+                lines.insert(lines.end(),
+                             std::make_move_iterator(providerLines.begin()),
+                             std::make_move_iterator(providerLines.end()));
+            }
+            return lines;
         }
 
         // ---------------------------------------------------------------------
@@ -826,6 +860,9 @@ namespace SystemModule
 
         // Battery callback
         inline static std::function<long()> _batteryCallback;
+
+        // Application-supplied diagnostics lines
+        inline static std::vector<DiagnosticsProvider> _diagnosticsProviders;
 
         // ADC Users
         inline static std::unordered_map<uint8_t, bool> adcUsers;
