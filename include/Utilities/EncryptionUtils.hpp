@@ -16,22 +16,36 @@ public:
     static constexpr size_t KEY_SIZE = 16;
     static constexpr size_t IV_SIZE  = 16;
 
-    // Derives a 128-bit AES key from a password via PBKDF2-HMAC-SHA256.
-    // Uses a fixed application salt so all devices derive the same key from the same password.
-    // Empty password must never be passed — callers must check EncryptionEnabled() first.
-    static void DeriveKey(const std::string& password, uint8_t key[KEY_SIZE])
-    {
-        static constexpr uint8_t SALT[]     = "CelestialWayfinder-LoRa-v1";
-        static constexpr size_t  SALT_LEN   = sizeof(SALT) - 1;
-        static constexpr uint32_t ITERATIONS = 10000;
+    // PBKDF2-HMAC-SHA256 parameters. Fixed application salt so every device
+    // derives the same key material from the same passphrase.
+    static constexpr uint8_t  PBKDF2_SALT[]    = "CelestialWayfinder-LoRa-v1";
+    static constexpr size_t   PBKDF2_SALT_LEN  = sizeof(PBKDF2_SALT) - 1;
+    static constexpr uint32_t PBKDF2_ITERS     = 10000;
 
+    // Derives `outLen` bytes of key material from a passphrase. Used both for
+    // the 16-byte legacy AES key and the 32-byte MeshCore GroupChannel secret,
+    // so the same passphrase yields a matching secret across the fleet.
+    static void DeriveKey(const std::string& password, uint8_t* out, size_t outLen)
+    {
         mbedtls_pkcs5_pbkdf2_hmac_ext(
             MBEDTLS_MD_SHA256,
             reinterpret_cast<const uint8_t*>(password.c_str()), password.size(),
-            SALT, SALT_LEN,
-            ITERATIONS,
-            KEY_SIZE, key);
+            PBKDF2_SALT, PBKDF2_SALT_LEN,
+            PBKDF2_ITERS,
+            outLen, out);
     }
+
+    // 128-bit AES key convenience overload. Empty password must never be passed —
+    // callers must check EncryptionEnabled() first.
+    static void DeriveKey(const std::string& password, uint8_t key[KEY_SIZE])
+    {
+        DeriveKey(password, key, KEY_SIZE);
+    }
+
+#ifndef USE_MESHCORE_LORA
+    // Everything below is the legacy AES-CBC transport cipher. Under MeshCore the
+    // group channel's encrypt-then-MAC (Mesh.cpp createGroupDatagram / Utils.cpp)
+    // replaces it entirely; only DeriveKey above survives into that build.
 
     // Seeds the CTR_DRBG that GenerateIV() draws from. Must be called once at
     // startup, from the window where a hardware entropy source is actually
@@ -137,8 +151,18 @@ public:
         outLen = inLen - padLen;
         return true;
     }
+#else
+    // MeshCore build: swallow the app's one-time entropy-window seed call
+    // (CompassUtils boot) — there is no DRBG to seed because GenerateIV is gone.
+    static bool SeedRng(const std::string& personalization = "")
+    {
+        (void)personalization;
+        return true;
+    }
+#endif
 
 private:
+#ifndef USE_MESHCORE_LORA
     static constexpr size_t MAX_PAYLOAD_SIZE = 528;
 
     static mbedtls_ctr_drbg_context& _Drbg()
@@ -163,4 +187,5 @@ private:
         esp_fill_random(out, len);
         return 0;
     }
+#endif
 };

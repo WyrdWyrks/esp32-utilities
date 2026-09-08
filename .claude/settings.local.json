@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "Bash(find \"C:\\\\Users\\\\Blake\\\\Visual_Studio_Code\" -name \"MessageBase*\" -o -name \"MessagePing*\" 2>/dev/null)",
-      "Bash(pio run *)"
+      "Bash(pio run *)",
+      "Bash(tee /c/Users/Blake/AppData/Local/Temp/claude/C--Users-Blake-Visual-Studio-Code-esp32-utilities/6404ba37-0db8-46c8-a3de-d70e8220cf50/scratchpad/baseline-v3.log)",
+      "Bash(tee /c/Users/Blake/AppData/Local/Temp/claude/C--Users-Blake-Visual-Studio-Code-esp32-utilities/6404ba37-0db8-46c8-a3de-d70e8220cf50/scratchpad/baseline-v3-2.log)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(git ls-remote *)"
     ]
   }
 }
