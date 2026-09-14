@@ -54,7 +54,7 @@ Utilities + Interfaces
 | `Display_Manager` | OLED orchestration, window/state stack, input routing via FreeRTOS queue |
 | `LED_Manager` | WS2812B animation, compass ring rendering, pattern registration |
 | `Settings_Manager` | JSON settings persistence (LittleFS) |
-| `LoraManager` | LoRa mesh networking, MessagePack serialization |
+| `LoraModule::Manager` | LoRa mesh networking (`: mesh::Mesh`, MeshCore engine); group-channel datagrams, forwarding, identity, "LoRa Channel" retune. `LoraModule::Utilities` is the app-facing façade. |
 | `NavigationModule::Manager` | GPS + compass integration, heading/distance calculation |
 | `FilesystemManager` | LittleFS file I/O |
 | `RpcManager` | Remote procedure call infrastructure |
@@ -65,7 +65,7 @@ Utilities + Interfaces
 - **State Machine:** `Window_State` + `OLED_Window` implement a state stack for display navigation
 - **Queue-Driven:** Display commands flow through FreeRTOS queues; inputs mapped to callbacks via `std::map<uint32_t, callbackPointer>`
 - **Interface/Plugin:** `LED_Pattern_Interface` and `DrawCommandInterface` allow registering new behaviors without modifying managers
-- **Factory:** `MessageBase::MessageFactory` creates polymorphic LoRa messages
+- **Type registry:** `LoraModule::Utilities::RegisterMessageType(guid, creator)` maps a LoRa message type's schema GUID to a factory; the wire carries a 1-byte tag (`guid & 0xFF`) that `CreatorForTag()` resolves on receive
 
 
 ## Coding Conventions
@@ -89,7 +89,9 @@ Utilities + Interfaces
 | NimBLE-Arduino | Bluetooth LE |
 | ESPAsyncWebServer | WiFi web interface |
 | tinyfsm | State machine support |
-| RadioHead (custom fork) | LoRa radio driver |
+| MeshCore (routing engine only) | LoRa mesh: `mesh::Mesh`/`Dispatcher`, group channels, dedup |
+| RadioLib | SX1276 radio driver (app-side `RadioLibLoRaDriver : CustomSX1276Wrapper`) |
+| rweather/Crypto + vendored ed25519 | MeshCore group-channel encrypt-then-MAC + identity |
 | ESP32Encoder | Rotary encoder input |
 | HMC5883 / QMC5883LCompass | Magnetometer/compass |
 
@@ -106,9 +108,14 @@ Utilities + Interfaces
 3. Register window with `Display_Manager`
 
 ### New LoRa Message Type
-1. Inherit from `MessageBase` in `include/HelperClasses/Message_Types/`
-2. Implement MessagePack serialization/deserialization
-3. Register with `MessageBase::MessageFactory`
+1. Inherit from `LoraModule::LoraMessageInterface` in `include/HelperClasses/Message_Types/`
+   (app-side lives in `Celestial-Wayfinder/include/HelperClasses/`)
+2. Implement `serializePayload(JsonObject&)` / `deserializePayload(JsonObject&)` /
+   `clone()` / `GetPrintableInformation()`, and a `static uint32_t GUID` (FNV via
+   `LoraModule::schemaHash("<sorted key chars>")`) returned from `SchemaGuid()`
+3. Register at bootstrap: `LoraModule::Utilities::RegisterMessageType(GUID, &Create)`;
+   subscribe handlers via `MessageTypeReceived(GUID) += ...`. Payload must fit
+   `MAX_GROUP_DATA_LENGTH` (165 B) after the 1-byte type tag.
 
 ### New Draw Command
 1. Inherit from `DrawCommandInterface` in `include/HelperClasses/DrawCommands/`

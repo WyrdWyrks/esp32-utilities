@@ -1,321 +1,470 @@
 #pragma once
 
-#include "LoraUtilities.hpp"
-#include "FilesystemUtils.h"
-#include "LoraDriverInterface.h"
-#include <atomic>
+// LoraModule::Manager : mesh::Mesh — the LoRa routing engine, backed by
+// MeshCore. Handles the Ed25519 identity, radio/dispatcher bring-up, the single
+// wait-discipline task, forwarding + RSSI backoff policy, and the "LoRa Channel"
+// runtime retune.
+//
+// App PingMessages ride the group channel through the LoraModule::Utilities
+// façade: SendMessage() enqueues, the mesh task drains that queue, serialises
+// [1-byte type tag][msgpack] and floods a group datagram; onGroupDataRecv()
+// reverses it and fires MessageTypeReceived(). The "Channel Key" setting is
+// stretched (PBKDF2) into the 32-byte GroupChannel secret.
 
-namespace
-{
-    const size_t  MAX_MESSAGE_SIZE         = 512;
-    const size_t  AFTER_SEND_BLOCK_TIME_MS = 50;
-    const size_t  NUM_REBROADCAST_ATTEMPTS = 1;
-    const size_t  MIN_SEND_DELAY_MS        = 100;
-    const size_t  MAX_SEND_DELAY_MS        = 3000;
-    const size_t  RELAY_JITTER_MS          = 500;
-    const uint8_t MAX_BOUNCES_LEFT         = 5;
-}
+#include <Arduino.h>
+#include <cstring>
+#include <functional>
+#include <memory>
+#include <string>
+#include <LittleFS.h>
+
+#include <ArduinoJson.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <esp_log.h>
+
+#include <Mesh.h>
+#include <helpers/ArduinoHelpers.h>          // StdRNG, ArduinoMillis
+#include <helpers/StaticPoolPacketManager.h>
+#include <helpers/IdentityStore.h>
+
+#include "HelperClasses/Mesh/MeshTables.hpp"
+#include "HelperClasses/Mesh/MeshTimeClock.hpp"
+#include "LoraMessageInterface.hpp"
+#include "EncryptionUtils.hpp"
+#include "LoraUtilities.hpp"
+#include "LoraChannelPlan.h"
+#include "FilesystemUtils.h"
+#include "SystemUtilities.hpp"
 
 namespace LoraModule
 {
+    // The radio driver lives in the application repo (it is hardware-pin
+    // specific), so it cannot be included here. Manager retunes via this
+    // seam instead of downcasting mesh::Radio; BootstrapLora registers it at
+    // construction, before Begin(). (Same function-pointer pattern as
+    // Utilities::ChannelKeyHandler — a direct include would be circular.)
+    using RadioRetuner = void (*)(mesh::Radio* radio, float freqMHz);
 
-class Manager
-{
-public:
-    static constexpr const char* TAG = "LoraManager";
-
-    Manager(LoraDriverInterface* driver) : _Driver(driver) {}
-
-    bool Init()
+    namespace
     {
-        if (_Driver == nullptr) { return false; }
-        if (!_Driver->Init())  { return false; }
-
-        LoraModule::Utilities::Init();
-
-        _sendQueue = System_Utils::getQueue(LoraModule::Utilities::MessageSendQueueID());
-        if (_sendQueue == nullptr) { return false; }
-
-        return true;
+        inline RadioRetuner& Retuner()
+        {
+            static RadioRetuner fn = nullptr;
+            return fn;
+        }
     }
 
-    void RadioTask()
+    inline void RegisterRadioRetuner(RadioRetuner fn) { Retuner() = fn; }
+
+    namespace
     {
-        // Self-register task handle so the DIO0 ISR and SendQueueTask can notify us
-        _ReceiveTaskHandle = xTaskGetCurrentTaskHandle();
+        constexpr uint32_t MESH_LOOP_MAX_WAIT_MS = 20;   // plan 6.3 tick cap
+        constexpr int      MESH_LOOPS_PER_WAKE   = 3;     // one pkt/dir per loop()
 
-        // Publish it so a channel change from the settings task can wake us
-        LoraModule::Utilities::RadioTaskHandle() = _ReceiveTaskHandle;
+        // RSSI-inverse relay backoff, ported from LoraManager.hpp:132-152.
+        constexpr int      RSSI_BACKOFF_MIN_DBM = -130;
+        constexpr int      RSSI_BACKOFF_MAX_DBM = -80;
+        constexpr uint32_t RSSI_BACKOFF_MAX_MS  = 2000;
+        constexpr uint32_t RELAY_JITTER_MS      = 500;
+    }
 
-        // Settings are processed before this task exists, so the channel chosen
-        // at boot is already sitting in the request slot — apply it before the
-        // first RX rather than waiting for the next settings change.
-        _ApplyPendingChannel();
+    class Manager : public mesh::Mesh
+    {
+    public:
+        static constexpr const char* TAG = "LoraManager";
 
-        // Enter continuous receive mode — safe here because handle is now set
-        _Driver->StartReceiving();
-
-        while (true)
+        Manager(mesh::Radio& radio,
+                    mesh::MillisecondClock& ms,
+                    StdRNG& rng,
+                    MeshTimeClock& rtc,
+                    StaticPoolPacketManager& pkts,
+                    MeshTables& tables)
+            : mesh::Mesh(radio, ms, rng, rtc, pkts, tables),
+              _tables(tables)
         {
-            // Block until DIO0 ISR (packet received) or SendQueueTask (message to send) wakes us
-            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            _instance = this;
 
-            // Try to read a received packet (data already buffered by library ISR)
-            uint8_t buffer[MAX_MESSAGE_SIZE];
-            size_t  len = 0;
+            // Register as the one consumer of "Channel Key" (see ApplyChannelKey).
+            LoraModule::Utilities::ChannelKeyHandler() = &ApplyChannelKey;
 
-            if (_Driver->ReceiveMessage(buffer, sizeof(buffer), len, 0))
+            // Apply a channel derived before Begin() (see ApplyChannelKey). The
+            // mesh task does not exist yet, so publishing here races nothing.
+            if (_PendingValid())
             {
-                ESP_LOGI(TAG, "Received LoRa message: %d bytes", len);
-                // Phase 1: Extract base fields for routing — works for any message format,
-                // regardless of whether we can decrypt the payload.
-                uint32_t routeSender = 0, routeMsgID = 0;
-                uint8_t  routeBouncesLeft = 0;
+                memcpy(_channel.secret, _PendingSecret(), PUB_KEY_SIZE);
+                memcpy(_channel.hash, _PendingHash(), PATH_HASH_SIZE);
+            }
+        }
 
-                if (LoraModule::Utilities::ReadBaseFields(buffer, len,
-                                                          routeSender, routeMsgID, routeBouncesLeft))
+        // Loads or creates the Ed25519 identity, derives the legacy 32-bit
+        // DeviceID from the pubkey prefix (keeps PingMessage::SenderTag() and
+        // every uint32_t-sender map working), installs the group channel from
+        // the persisted Channel Key, then brings up dispatcher + radio.
+        bool Begin()
+        {
+            // Create the facade's send queue BEFORE anything can call
+            // Utilities::SendMessage(). The mesh task is Manager::Loop()
+            // draining it — but Loop() only runs once the app registers the mesh
+            // task, which happens after Begin(). Doing Init() inside Loop() would
+            // mean every send before the task starts fails with "queue not ready"
+            // (the UI shows "Failed to send").
+            LoraModule::Utilities::Init();
+
+            IdentityStore store(LittleFS, "/mesh");
+            store.begin();
+
+            if (!store.load("identity", self_id))
+            {
+                ESP_LOGW(TAG, "no stored identity - generating one");
+                self_id = mesh::LocalIdentity(getRNG());
+                if (!store.save("identity", self_id))
                 {
-                    if (routeBouncesLeft > MAX_BOUNCES_LEFT)
-                    {
-                        ESP_LOGW(TAG, "Clamping bouncesLeft %d -> %d from sender 0x%08X",
-                                 routeBouncesLeft, MAX_BOUNCES_LEFT, routeSender);
-                        routeBouncesLeft = MAX_BOUNCES_LEFT;
-                    }
-
-                    if (routeSender == System_Utils::DeviceID)
-                    {
-                        ESP_LOGI(TAG, "Message echoed back from this node — dropping");
-                        LoraModule::Utilities::IncrementEchoCount();
-                    }
-                    else
-                    {
-                        ESP_LOGI(TAG, "Received from sender 0x%08X  msgID 0x%08X  bouncesLeft %d",
-                                 routeSender, routeMsgID, routeBouncesLeft);
-
-                        bool shouldFwd = ShouldMessageBeForwarded(routeSender, routeMsgID, routeBouncesLeft);
-
-                        if (!shouldFwd)
-                        {
-                            auto it = _lastReceivedMessages.find(routeSender);
-                            if (routeBouncesLeft == 0)
-                            {
-                                ESP_LOGI(TAG, "Not forwarding — bouncesLeft == 0");
-                            }
-                            else if (it != _lastReceivedMessages.end() && it->second == routeMsgID)
-                            {
-                                ESP_LOGI(TAG, "Not forwarding — duplicate (last seen msgID 0x%08X)", it->second);
-                            }
-                        }
-
-                        bool isNew = !LoraModule::Utilities::MessageExists(routeSender, routeMsgID);
-                        LoraModule::Utilities::RecordRouting(routeSender, routeMsgID);
-
-                        // Phase 2: Attempt full deserialization + application dispatch.
-                        // Returns nullptr if encryption keys don't match ("different chatroom").
-                        // Routing above has already happened regardless.
-                        auto msg = LoraModule::Utilities::DeserializeMessage(buffer, len);
-                        if (msg != nullptr)
-                        {
-                            auto& events = LoraModule::Utilities::MessageEvents();
-                            auto evIt = events.find(msg->SchemaGuid());
-                            if (evIt != events.end())
-                            {
-                                evIt->second.Invoke(msg, isNew);
-                            }
-                        }
-
-                        if (shouldFwd)
-                        {
-                            // Re-enter RX immediately so the radio stays live during the wait
-                            _Driver->StartReceiving();
-
-                            // RSSI-based backoff: weak signal = better relay candidate = shorter wait.
-                            // Maps [-130, -80] dBm → [0, 2000] ms  (stronger signal = longer delay,
-                            // letting distant nodes — which are better positioned — relay first).
-                            int rssi = _Driver->PacketRssi();
-                            int clampedRssi = rssi < -130 ? -130 : (rssi > -80 ? -80 : rssi);
-                            uint32_t rssiDelayMs = static_cast<uint32_t>((clampedRssi + 130) * 2000 / 50);
-
-                            // Jitter, because the RSSI term alone is deterministic and
-                            // saturates: every node closer than about -80 dBm clamps to
-                            // the same value and so waits exactly the same time, then
-                            // relays simultaneously. That is the common case for a group
-                            // of devices sitting together.
-                            rssiDelayMs += static_cast<uint32_t>(rand() % RELAY_JITTER_MS);
-
-                            ESP_LOGI(TAG, "Relay wait %u ms (RSSI %d dBm) — bouncesLeft %d -> %d",
-                                     rssiDelayMs, rssi, routeBouncesLeft, routeBouncesLeft - 1);
-
-                            if (rssiDelayMs > 0)
-                            {
-                                vTaskDelay(pdMS_TO_TICKS(rssiDelayMs));
-                            }
-
-                            if (msg != nullptr)
-                            {
-                                // Full message available — re-serialize cleanly via the send queue.
-                                msg->bouncesLeft--;
-                                LoraModule::Utilities::SendMessage(msg);
-                            }
-                            else
-                            {
-                                // Different chatroom — relay raw bytes with bouncesLeft decremented,
-                                // preserving the original ciphertext so the intended recipients can decrypt.
-                                size_t relayLen = 0;
-                                if (LoraModule::Utilities::RelayMessage(buffer, len,
-                                                                         _RelayBuffer, relayLen,
-                                                                         routeBouncesLeft - 1))
-                                {
-                                    while (!_SendBufferIdle.load()) { vTaskDelay(pdMS_TO_TICKS(10)); }
-                                    memcpy(_SendBuffer, _RelayBuffer, relayLen);
-                                    _SendBufferLen = relayLen;
-                                    _SendBufferIdle.store(false);
-                                }
-                            }
-                            _lastReceivedMessages[routeSender] = routeMsgID;
-                        }
-                    }
+                    ESP_LOGE(TAG, "failed to persist new identity");
                 }
             }
 
-            // Send any pending outbound message
-            if (!_SendBufferIdle)
-            {
-                // Wait for a clear channel before transmitting
-                while (_Driver->IsChannelBusy())
-                {
-                    ESP_LOGI(TAG, "Channel busy — waiting");
-                    vTaskDelay(pdMS_TO_TICKS(AFTER_SEND_BLOCK_TIME_MS));
-                }
+            uint32_t devId;
+            memcpy(&devId, self_id.pub_key, sizeof(devId));
+            System_Utils::DeviceID = devId;
+            ESP_LOGI(TAG, "identity ready, DeviceID 0x%08X", (unsigned)devId);
 
-                if (!_Driver->SendMessage(_SendBuffer, _SendBufferLen))
-                {
-                    ESP_LOGE(TAG, "Failed to send message");
-                }
-                _SendBufferIdle = true;
-                vTaskDelay(pdMS_TO_TICKS(AFTER_SEND_BLOCK_TIME_MS));
+            SetChannelKey(FilesystemModule::Utilities::FetchStringSetting(
+                LoraModule::Utilities::SETTING_LORA_PASSWORD, ""));
+
+            mesh::Mesh::begin();   // Dispatcher::begin() -> _radio->begin()
+            ESP_LOGI(TAG, "mesh up");
+            return true;
+        }
+
+        // Rebuilds the group channel from a passphrase. PBKDF2 (shared salt) so
+        // the same key yields the same 32-byte secret fleet-wide; the 1-byte
+        // channel.hash is just a cleartext selector -- encrypt-then-MAC over the
+        // secret is the real separation (plan 5.1). Safe to call at runtime when
+        // the setting changes: derive into locals first and publish with two
+        // aligned stores, so the mesh task (which reads _channel locklessly) can
+        // never observe a mismatched secret/selector pair — the worst case is one
+        // dropped packet while the 32-byte copy lands mid-flight.
+        void SetChannelKey(const std::string& passphrase)
+        {
+            uint8_t secret[PUB_KEY_SIZE];
+            uint8_t hash[PATH_HASH_SIZE];
+            EncryptionUtils::DeriveKey(passphrase, secret, PUB_KEY_SIZE);
+
+            uint8_t digest[32];
+            mesh::Utils::sha256(digest, sizeof(digest), secret, PUB_KEY_SIZE);
+            memcpy(hash, digest, PATH_HASH_SIZE);
+
+            if (passphrase.empty())
+            {
+                // Empty key = every default-config device shares one well-known
+                // group secret. Traffic is still encrypted+MAC'd, but there is no
+                // privacy against anyone who never set a key. Loud on purpose:
+                // an empty field must not read as "encrypted".
+                ESP_LOGW(TAG, "Channel Key EMPTY - running on the shared default "
+                              "channel with a well-known secret. Set a Channel Key "
+                              "for any real privacy.");
+            }
+            else
+            {
+                ESP_LOGI(TAG, "channel key set (custom), selector 0x%02X", hash[0]);
             }
 
-            // Apply a channel change requested from the settings task. Done here
-            // rather than at the top of the loop so a packet that arrived on the
-            // old channel is still processed, and so the StartReceiving() below
-            // is what latches the new frequency.
+            memcpy(_channel.secret, secret, PUB_KEY_SIZE);   // publish secret...
+            memcpy(_channel.hash, hash, PATH_HASH_SIZE);     // ...then its selector
+        }
+
+        // Single consumer of the "Channel Key" setting in this build (registered
+        // with LoraModule::Utilities::ChannelKeyHandler() below; invoked from
+        // UpdateSettings on the settings task). Uses the live instance when Begin()
+        // has run; before that, stashes the derived bytes — Begin()'s own
+        // SetChannelKey() re-reads the persisted setting, so the stash is
+        // belt-and-braces for ordering, not correctness.
+        static void ApplyChannelKey(const std::string& passphrase)
+        {
+            if (_instance != nullptr)
+            {
+                _instance->SetChannelKey(passphrase);
+                return;
+            }
+
+            EncryptionUtils::DeriveKey(passphrase, _PendingSecret(), PUB_KEY_SIZE);
+            uint8_t digest[32];
+            mesh::Utils::sha256(digest, sizeof(digest), _PendingSecret(), PUB_KEY_SIZE);
+            memcpy(_PendingHash(), digest, PATH_HASH_SIZE);
+            _PendingValid() = true;
+        }
+
+        // Relay other nodes' traffic, or not. No user setting: these devices are
+        // mobile and a leaf node that wandered would silently break the mesh, so
+        // BootstrapLora hardcodes this true. Kept as a knob only for bench builds
+        // that want to force a single-relay topology.
+        void SetRepeat(bool on) { _repeat = on; }
+
+        // ------------------------------------------------------------------
+        // Wait-discipline task body (plan 6.3). Replaces both RadioTask and
+        // SendQueueTask. Dispatcher::loop() never blocks and its outbound
+        // scheduling is time-driven, so we cannot sleep on portMAX_DELAY.
+        // Also drains the facade's send queue here so createGroupDatagram/
+        // sendFlood only ever run on this task, never racing loop().
+        // ------------------------------------------------------------------
+        void Loop()
+        {
+            MeshTaskHandle() = xTaskGetCurrentTaskHandle();
+            // RequestChannel() wakes the task that owns the radio registers —
+            // in this build, us. Legacy LoraManager publishes the same handle.
+            LoraModule::Utilities::RadioTaskHandle() = MeshTaskHandle();
+            _sendQueue = System_Utils::getQueue(LoraModule::Utilities::MessageSendQueueID());
+
+            // Retune before the first loop() so a boot-time channel from settings
+            // (applied by the settings pass, which runs before this task exists)
+            // lands while the radio is still untouched. RadioTaskHandle is set
+            // above, so RequestChannel()'s notify also works now.
             _ApplyPendingChannel();
 
-            // Re-enter continuous receive mode for the next packet
-            _Driver->StartReceiving();
-        }
-    }
-
-    void SendQueueTask()
-    {
-        if (_sendQueue == nullptr)
-        {
-            vTaskDelete(NULL);
-        }
-
-        while (true)
-        {
-            // Block until a message is queued
-            std::shared_ptr<LoraModule::LoraMessageInterface>* wrapper = nullptr;
-            if (xQueueReceive(_sendQueue, &wrapper, portMAX_DELAY) != pdTRUE) { continue; }
-
-            auto msg = *wrapper;
-            delete wrapper;
-
-            bool isOwn = (msg->sender == System_Utils::DeviceID);
-            uint8_t attemptsLeft = isOwn
-                ? std::max((uint8_t)1, LoraModule::Utilities::DefaultSendAttempts())
-                : static_cast<uint8_t>(NUM_REBROADCAST_ATTEMPTS);
-
-            ESP_LOGI(TAG, "Queued msgID 0x%08X sender 0x%08X — %s — attempts %d",
-                     msg->msgID, msg->sender, isOwn ? "own" : "relay", attemptsLeft);
-
-            while (attemptsLeft > 0)
+            for (;;)
             {
-                // Random backoff in [MIN_SEND_DELAY_MS, MAX_SEND_DELAY_MS)
-                uint32_t delayMs = MIN_SEND_DELAY_MS +
-                    static_cast<uint32_t>(rand() % (MAX_SEND_DELAY_MS - MIN_SEND_DELAY_MS));
-                vTaskDelay(pdMS_TO_TICKS(delayMs));
+                ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(MESH_LOOP_MAX_WAIT_MS));
 
-                // Wait for RadioTask to finish any in-progress send
-                while (!_SendBufferIdle.load())
+                _DrainSendQueue();
+                _ApplyPendingChannel();
+
+                for (int i = 0; i < MESH_LOOPS_PER_WAKE; ++i)
                 {
-                    vTaskDelay(pdMS_TO_TICKS(10));
+                    loop();   // mesh::Mesh::loop -> Dispatcher::loop
                 }
+                if (OnLoopTick) { OnLoopTick(); }
+            }
+        }
 
-                size_t outLen = 0;                
+        // Optional per-wake hook, run on the mesh task after loop().
+        std::function<void()> OnLoopTick;
 
-                if (LoraModule::Utilities::SerializeMessage(msg, _SendBuffer, outLen))
-                {
-                    _SendBufferLen = outLen;
-                    _SendBufferIdle.store(false);
+        // Published so LoraUtils::SendMessage() (display/RPC task) can wake the
+        // mesh task right after enqueueing, instead of waiting out the tick.
+        static TaskHandle_t& MeshTaskHandle()
+        {
+            static TaskHandle_t h = nullptr;
+            return h;
+        }
 
-                    if (_ReceiveTaskHandle != nullptr)
-                    {
-                        xTaskNotifyGive(_ReceiveTaskHandle);
-                    }
+        static void NotifyMeshTask()
+        {
+            TaskHandle_t h = MeshTaskHandle();
+            if (h != nullptr) { xTaskNotifyGive(h); }
+        }
 
-                    ESP_LOGI(TAG, "Transmitting msgID 0x%08X — attemptsLeft %d -> %d",
-                             msg->msgID, attemptsLeft, attemptsLeft - 1);
-                }
-                else
-                {
-                    ESP_LOGE(TAG, "Failed to serialize msgID 0x%08X — dropping", msg->msgID);
-                    break;
-                }
+        uint32_t EchoCount() const { return LoraModule::Utilities::GetEchoCount(); }
 
-                attemptsLeft--;
+    protected:
+        // MeshCore's default is false -> a silent one-hop mesh. We always relay
+        // (see SetRepeat). _repeat is only ever written from BootstrapLora before
+        // the mesh task starts, so a plain read here is race-free.
+        bool allowPacketForward(const mesh::Packet* /*packet*/) override
+        {
+            return _repeat;
+        }
+
+        // Weak signal => likely a distant, better-placed relay => shorter wait,
+        // so it transmits first. Jitter because co-located nodes otherwise
+        // clamp to identical delays and collide (LoraManager.hpp:132-152).
+        uint32_t getRetransmitDelay(const mesh::Packet* /*packet*/) override
+        {
+            int rssi = static_cast<int>(_radio->getLastRSSI());
+            int clamped = rssi < RSSI_BACKOFF_MIN_DBM ? RSSI_BACKOFF_MIN_DBM
+                        : (rssi > RSSI_BACKOFF_MAX_DBM ? RSSI_BACKOFF_MAX_DBM : rssi);
+            uint32_t base = static_cast<uint32_t>(clamped - RSSI_BACKOFF_MIN_DBM)
+                          * RSSI_BACKOFF_MAX_MS
+                          / (RSSI_BACKOFF_MAX_DBM - RSSI_BACKOFF_MIN_DBM);
+            return base + getRNG()->nextInt(0, RELAY_JITTER_MS);
+        }
+
+        float getAirtimeBudgetFactor() const override { return 1.0f; }
+
+        // MeshCore's RadioLibWrapper::isChannelActive() has a dead THRESHOLD
+        // check (getCurrentRSSI() > _noise_floor + 0 is true on any live RX
+        // chain), so with interference threshold 0 the CAD-less SX1276 path
+        // reports every channel busy and sends stall until Dispatcher's 4 s
+        // CAD-busy override fires. A small nonzero value keeps the compare
+        // noise-floor-relative. The app picks the real number per hardware rev
+        // (BootstrapLora); this is only the library-side fallback.
+        int getInterferenceThreshold() const override
+        {
+#ifdef LORA_TX_THRESHOLD
+            return LORA_TX_THRESHOLD;
+#else
+            return 12;
+#endif
+        }
+
+        // Retune on a "LoRa Channel" change. RequestChannel() (LoraUtilities)
+        // stores the pending value and pokes RadioTaskHandle(); we publish that
+        // handle so the mesh task wakes within one tick instead of up to 20 ms.
+        void _ApplyPendingChannel()
+        {
+            int channel = LoraModule::Utilities::TakePendingChannel();
+            if (channel == 0) { return; }
+
+            if (_retuning) { return; }          // reentrant loop() must not nest
+            _retuning = true;
+
+            if (channel != LoraModule::Utilities::ActiveChannel())
+            {
+                _Retune(channel);
+            }
+            else
+            {
+                ESP_LOGW(TAG, "ignoring retune request for active channel %d", channel);
             }
 
-            ESP_LOGI(TAG, "msgID 0x%08X — all attempts exhausted, removing", msg->msgID);
+            _retuning = false;
         }
-    }
 
-    void SetTaskHandles(TaskHandle_t sendHandle, TaskHandle_t receiveHandle)
-    {
-        _SendTaskHandle    = sendHandle;
-        _ReceiveTaskHandle = receiveHandle;
-    }
+        void _Retune(int channel)
+        {
+            auto* radio = _radio;
+            float freqMHz = LoraModule::ChannelToHz(channel) / 1000000.0f;
 
-protected:
-    // Retunes the radio if a channel change is pending. Radio task only —
-    // it is the sole owner of the radio's registers and mode transitions.
-    void _ApplyPendingChannel()
-    {
-        int channel = LoraModule::Utilities::TakePendingChannel();
-        if (channel == 0) { return; }
+            // Dispatcher::loop() early-returns (leaving the radio in RX) while a
+            // send is in flight, so getOutboundCount()==0 does not prove idle:
+            // retune only after loop() has run clean twice — two passes with no
+            // TX started and nothing queued means any earlier transmit has
+            // completed and drained.
+            int quietLoops = 0, waited = 0;
+            while (quietLoops < 2 && waited++ < 50)   // ~100 ms ceiling
+            {
+                loop();
+                if (_mgr->getOutboundCount(_ms->getMillis()) == 0) { quietLoops++; }
+                else { quietLoops = 0; vTaskDelay(pdMS_TO_TICKS(2)); }
+            }
+            if (quietLoops < 2)
+            {
+                ESP_LOGW(TAG, "retune: radio never quiet — applying anyway");
+            }
 
-        uint32_t hz = LoraModule::ChannelToHz(channel);
-        ESP_LOGI(TAG, "Switching to channel %d (%u Hz)", channel, hz);
+            if (Retuner() != nullptr) { Retuner()(radio, freqMHz); }
+            _radio->begin();   // re-arm DIO0 action + startReceive on new freq
+            LoraModule::Utilities::ActiveChannel() = channel;
+            ESP_LOGI(TAG, "retuned to channel %d (%u Hz)",
+                     channel, (unsigned)LoraModule::ChannelToHz(channel));
+        }
 
-        _Driver->SetFrequency(hz);
-        LoraModule::Utilities::ActiveChannel() = channel;
-    }
+        // Single channel. A non-match returns 0, which only skips the recv
+        // callback -- the packet is still relayed by the route layer, preserving
+        // the "relay other chatrooms' traffic" behaviour (plan Phase 2 note).
+        int searchChannelsByHash(const uint8_t* hash, mesh::GroupChannel channels[],
+                                 int max_matches) override
+        {
+            if (max_matches < 1) { return 0; }
+            if (memcmp(hash, _channel.hash, PATH_HASH_SIZE) != 0) { return 0; }
+            channels[0] = _channel;
+            return 1;
+        }
 
-    bool ShouldMessageBeForwarded(uint32_t senderID, uint32_t msgID, uint8_t bouncesLeft)
-    {
-        if (senderID == System_Utils::DeviceID) { return false; }
-        if (bouncesLeft == 0) { return false; }
+        // [0]      = type tag (low byte of the schema GUID)
+        // [1..len) = msgpack: base routing fields + "p" payload map
+        void onGroupDataRecv(mesh::Packet* /*packet*/, uint8_t /*type*/,
+                             const mesh::GroupChannel& /*channel*/,
+                             uint8_t* data, size_t len) override
+        {
+            if (len < 2) { return; }
+            const uint8_t tag = data[0];
 
-        auto it = _lastReceivedMessages.find(senderID);
-        if (it == _lastReceivedMessages.end()) { return true; }
-        return it->second != msgID;
-    }
+            JsonDocument doc;
+            if (deserializeMsgPack(doc, data + 1, len - 1) != DeserializationError::Ok)
+            {
+                ESP_LOGW(TAG, "recv: msgpack decode failed (tag 0x%02X, %u bytes)",
+                         tag, (unsigned)len);
+                return;
+            }
 
-    LoraDriverInterface* _Driver;
+            MessageCreator creator = LoraModule::Utilities::CreatorForTag(tag);
+            uint32_t guid = LoraModule::Utilities::GuidForTag(tag);
+            if (creator == nullptr || guid == 0)
+            {
+                ESP_LOGW(TAG, "recv: no message type for tag 0x%02X", tag);
+                return;
+            }
 
-    QueueHandle_t _sendQueue = nullptr;
+            JsonObject payload = doc[LoraMessageInterface::KEY_PAYLOAD].as<JsonObject>();
+            if (payload.isNull()) { return; }
 
-    std::unordered_map<uint32_t, uint32_t> _lastReceivedMessages;
+            auto msg = creator(payload);          // deserialises the payload map
+            if (!msg) { return; }
+            msg->deserialize(doc);                // base fields: sender/msgID/time/date
+            if (!msg->IsValid()) { return; }
 
-    TaskHandle_t _SendTaskHandle    = nullptr;
-    TaskHandle_t _ReceiveTaskHandle = nullptr;
+            // MeshCore's dedup dropped repeats before we got here, so every
+            // delivery is new.
+            LoraModule::Utilities::MessageTypeReceived(guid).Invoke(msg, true);
+        }
 
-    std::atomic<bool> _SendBufferIdle { true };
-    uint8_t  _SendBuffer[MAX_MESSAGE_SIZE]{};
-    uint8_t  _RelayBuffer[MAX_MESSAGE_SIZE]{};
-    size_t   _SendBufferLen = 0;
-};
+    private:
+        void _DrainSendQueue()
+        {
+            if (_sendQueue == nullptr) { return; }
 
-} // namespace LoraModule
+            std::shared_ptr<LoraMessageInterface>* wrapper = nullptr;
+            while (xQueueReceive(_sendQueue, &wrapper, 0) == pdTRUE)
+            {
+                if (wrapper != nullptr)
+                {
+                    _SendLoraMessage(*wrapper);
+                    delete wrapper;
+                }
+            }
+        }
+
+        // mesh task only.
+        void _SendLoraMessage(const std::shared_ptr<LoraMessageInterface>& msg)
+        {
+            if (!msg) { return; }
+
+            JsonDocument doc;
+            if (!msg->serialize(doc))      // base fields + "p" payload; iv is zero
+            {
+                ESP_LOGE(TAG, "send: serialize failed for msgID 0x%08X", (unsigned)msg->msgID);
+                return;
+            }
+
+            uint8_t buf[MAX_GROUP_DATA_LENGTH];
+            buf[0] = static_cast<uint8_t>(msg->SchemaGuid() & 0xFFu);
+            size_t n = serializeMsgPack(doc, buf + 1, sizeof(buf) - 1);
+            if (n == 0)
+            {
+                ESP_LOGE(TAG, "send: msgpack overflow (>%u bytes)", (unsigned)(sizeof(buf) - 1));
+                return;
+            }
+
+            mesh::Packet* pkt =
+                createGroupDatagram(PAYLOAD_TYPE_GRP_DATA, _channel, buf, n + 1);
+            if (pkt == nullptr)
+            {
+                ESP_LOGE(TAG, "send: createGroupDatagram null (pool empty?)");
+                return;
+            }
+
+            _tables.setOwnOutbound(pkt);   // so MeshTables counts the echoes
+            sendFlood(pkt);
+            ESP_LOGI(TAG, "sent msgID 0x%08X  tag 0x%02X  %u bytes",
+                     (unsigned)msg->msgID, buf[0], (unsigned)(n + 1));
+        }
+
+        MeshTables&        _tables;
+        mesh::GroupChannel _channel {};
+        bool               _repeat = true;
+        bool               _retuning = false;
+        QueueHandle_t      _sendQueue = nullptr;
+
+        // Sole Manager instance (one per firmware, wired by BootstrapLora).
+        // Lets LoraUtilities::UpdateSettings() reach SetChannelKey() without the
+        // library's generic façade hard-coding a dependency on this class.
+        static inline Manager* _instance = nullptr;
+
+        // Channel bytes derived before any instance existed. Meyers singletons so
+        // there is no .cpp — the pattern this codebase uses for all new statics.
+        static uint8_t* _PendingSecret() { static uint8_t s[PUB_KEY_SIZE]{}; return s; }
+        static uint8_t* _PendingHash()   { static uint8_t h[PATH_HASH_SIZE]{}; return h; }
+        static bool&    _PendingValid()  { static bool v = false; return v; }
+    };
+}
