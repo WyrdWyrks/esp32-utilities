@@ -587,7 +587,15 @@ namespace NavigationModule
         // before polling has started. Serviced by ServicePollCycle().
         static void RequestSourceRefresh(const std::string& moniker)
         {
-            _PendingSourceRefresh() = moniker;
+            // Written here on the UI task, read/cleared by the poll task in
+            // ServicePollCycle(): a std::string assignment racing a read is a
+            // heap-corruption risk, so both sides go through the cache mutex.
+            if (xSemaphoreTake(_CacheMutex(), portMAX_DELAY) == pdTRUE)
+            {
+                _PendingSourceRefresh() = moniker;
+                xSemaphoreGive(_CacheMutex());
+            }
+
             if (_PollTaskHandle() != nullptr)
             {
                 xTaskNotifyGive(_PollTaskHandle());
@@ -599,8 +607,12 @@ namespace NavigationModule
         // services just that source; otherwise runs the normal full sweep.
         static void ServicePollCycle()
         {
-            std::string moniker = _PendingSourceRefresh();
-            _PendingSourceRefresh().clear();
+            std::string moniker;
+            if (xSemaphoreTake(_CacheMutex(), portMAX_DELAY) == pdTRUE)
+            {
+                moniker.swap(_PendingSourceRefresh()); // take + clear in one step
+                xSemaphoreGive(_CacheMutex());
+            }
 
             if (!moniker.empty())
             {

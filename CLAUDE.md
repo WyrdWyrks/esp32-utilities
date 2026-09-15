@@ -66,6 +66,7 @@ Utilities + Interfaces
 - **Queue-Driven:** Display commands flow through FreeRTOS queues; inputs mapped to callbacks via `std::map<uint32_t, callbackPointer>`
 - **Interface/Plugin:** `LED_Pattern_Interface` and `DrawCommandInterface` allow registering new behaviors without modifying managers
 - **Type registry:** `LoraModule::Utilities::RegisterMessageType(guid, creator)` maps a LoRa message type's schema GUID to a factory; the wire carries a 1-byte tag (`guid & 0xFF`) that `CreatorForTag()` resolves on receive
+- **Task ownership:** `MessageTypeReceived(guid)` handlers run on the mesh task, `SettingsUpdated()` handlers on whichever task changed the setting (RPC or display), and `GeolocationInterface`/`TimeSourceInterface` calls can come from the poll, display and mesh tasks. Only the display task may touch the window stack, draw-command lists or the framebuffer: to show data that changed elsewhere, call `DisplayModule::Utilities::sendRefreshCommand()` (ticks the active window and renders on the display task; see `CompassUtils::PassMessageReceivedToDisplay` in the app), or `registerCallback()` + `sendCallbackCommand()` for arbitrary display-task work. Shared sources guard their own state (see `GpsSource`).
 
 
 ## Coding Conventions

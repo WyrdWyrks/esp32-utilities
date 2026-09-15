@@ -99,12 +99,30 @@ namespace DisplayModule
             System_Utils::sendToQueue(_queueID, &item, 0);
         }
 
-        static void sendCallbackCommand(uint32_t resourceID)
+        // Queues a registered callback (see registerCallback) to run on the
+        // display task. The queue is one slot deep, so a producer on another
+        // task that must not lose the request can wait up to timeoutMs for the
+        // display task to drain the previous item; the default drops it if the
+        // slot is taken. Returns whether the command was queued.
+        static bool sendCallbackCommand(uint32_t resourceID, size_t timeoutMs = 0)
         {
             DisplayCommandQueueItem item;
             item.commandType                            = CommandType::CALLBACK_COMMAND;
             item.commandData.callbackCommand.resourceID = resourceID;
-            System_Utils::sendToQueue(_queueID, &item, 0);
+            return System_Utils::sendToQueue(_queueID, &item, timeoutMs);
+        }
+
+        // Asks the display task for one out-of-band refresh: it ticks the
+        // active window (the same onTick() its refresh interval drives) and
+        // renders, then goes back to waiting on the queue. Safe to call from
+        // any task; this never draws on the caller's task. Same one-slot
+        // queue semantics as sendCallbackCommand: timeoutMs bounds how long to
+        // wait for a free slot, 0 drops the request if one isn't free.
+        static bool sendRefreshCommand(size_t timeoutMs = 0)
+        {
+            DisplayCommandQueueItem item;
+            item.commandType = CommandType::REFRESH_COMMAND;
+            return System_Utils::sendToQueue(_queueID, &item, timeoutMs);
         }
 
         // ------------------------------------------------------------------

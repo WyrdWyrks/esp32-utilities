@@ -95,6 +95,7 @@ namespace DisplayModule
                                           &item,
                                           timeout) == pdTRUE;
                 bool       timedOut = !gotItem;
+                bool       refreshRequested = false;
 
                 if (gotItem)
                 {
@@ -128,15 +129,24 @@ namespace DisplayModule
                                 item.commandData.callbackCommand.resourceID);
                             break;
 
+                        // An explicit refresh behaves like the refresh
+                        // interval firing early: tick the window so it
+                        // rebuilds its draw commands, then fall through to the
+                        // render below.
+                        case CommandType::REFRESH_COMMAND:
+                            refreshRequested = true;
+                            break;
+
                         default:
                             break;
                     }
                 }
 
-                // Tick the active window only on autonomous refresh (timeout),
-                // not on every input event, so per-frame logic (cursor blink,
-                // countdown timers, etc.) runs at the state's requested interval.
-                if (timedOut)
+                // Tick the active window only on autonomous refresh (timeout
+                // or an explicit REFRESH_COMMAND), not on every input event, so
+                // per-frame logic (cursor blink, countdown timers, etc.) runs
+                // at the state's requested interval.
+                if (timedOut || refreshRequested)
                 {
                     auto win = Utilities::activeWindow();
                     if (win) 

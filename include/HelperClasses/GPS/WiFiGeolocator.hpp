@@ -50,6 +50,15 @@ namespace NavigationModule
         void SetMinRssi(int minRssi) { _minRssi = minRssi; }
         // Require at least this many matched APs before reporting a fix.
         void SetMinMatches(size_t n) { _minMatches = n; }
+        // Passive scans only listen for beacons instead of transmitting a
+        // probe request on every channel. That removes the WiFi TX current
+        // spikes from each poll cycle — worth trying on a battery build that
+        // brownout-resets while idle — at the cost of a slower scan that can
+        // miss APs with long beacon intervals. Off by default (active scan).
+        void SetPassiveScan(bool passive) { _passiveScan = passive; }
+        // Dwell time per channel in ms; bounds how long the blocking scan holds
+        // the poll task and the radio. The driver default is 300.
+        void SetMaxMsPerChannel(uint32_t ms) { _maxMsPerChannel = ms; }
 
         // ------------------------------------------------------------------
         // GeolocationInterface
@@ -70,7 +79,8 @@ namespace NavigationModule
                 return false;
             }
 
-            int16_t n = WiFi.scanNetworks(false /*async*/, true /*show_hidden*/);
+            int16_t n = WiFi.scanNetworks(false /*async*/, true /*show_hidden*/,
+                                          _passiveScan, _maxMsPerChannel);
             if (n < 0)
             {
                 ESP_LOGW(_TAG, "WiFi scan failed (code %d); is WiFi initialised?", n);
@@ -159,6 +169,8 @@ namespace NavigationModule
         double _weightExponent   = 2.0;  // inverse-square distance weighting
         int    _minRssi          = -90;  // ignore APs weaker than this
         size_t _minMatches       = 1;    // matched APs required for a fix
+        bool     _passiveScan     = false; // see SetPassiveScan
+        uint32_t _maxMsPerChannel = 300;   // see SetMaxMsPerChannel
 
         const char* _TAG = "WiFiGeolocator";
     };

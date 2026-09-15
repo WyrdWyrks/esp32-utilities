@@ -4,9 +4,18 @@
 #include "TimeSourceInterface.hpp"
 #include "TinyGPS++.h"
 #include "NavigationUtils.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 namespace NavigationModule
 {
+    // Registered twice: as a TimeSourceInterface (System_Utils::GetCurrentUTC)
+    // and as a GeolocationInterface (the location poll task). The time path is
+    // reached from the display task (home-screen clock) and the mesh task
+    // (MeshTimeClock stamps every packet), while the location path runs on the
+    // poll task — so three tasks can end up draining the same UART into the
+    // same TinyGPSPlus parser at once. Neither the parser nor _lastLocation is
+    // reentrant, so every entry point below serialises on _gpsMutex.
     class GpsSource : public SystemModule::TimeSourceInterface, public GeolocationInterface
     {
     public:
@@ -14,6 +23,7 @@ namespace NavigationModule
 
         bool TryGetCurrentUTC(time_t& outTime) override
         {
+            Lock lock(_gpsMutex);
             _UpdateGps();
             
             if (!_gps.time.isValid() || !_gps.date.isValid() || _gps.date.value() == 0)
@@ -28,6 +38,7 @@ namespace NavigationModule
 
         bool TryGetCurrentLocation(double& outLat, double& outLon) override
         {
+            Lock lock(_gpsMutex);
             _UpdateGps();
 
             // TODO: check how old this location is before returning it
@@ -52,6 +63,21 @@ namespace NavigationModule
         const char * _TAG = "GpsSource";
         TinyGPSLocation _lastLocation;
 
+        // Guards _gps, _gpsStream reads and _lastLocation (see class comment).
+        // Distinct from GeolocationInterface's result mutex, which
+        // _PublishResult takes on its own — no nesting between the two.
+        SemaphoreHandle_t _gpsMutex = xSemaphoreCreateMutex();
+
+        struct Lock
+        {
+            SemaphoreHandle_t& s;
+            explicit Lock(SemaphoreHandle_t& sem) : s(sem) { xSemaphoreTake(s, portMAX_DELAY); }
+            ~Lock() { xSemaphoreGive(s); }
+            Lock(const Lock&)            = delete;
+            Lock& operator=(const Lock&) = delete;
+        };
+
+        // Caller must hold _gpsMutex.
         void _UpdateGps()
         {
             ESP_LOGV(_TAG, "Reading %d bytes from GPS stream", _gpsStream.available());

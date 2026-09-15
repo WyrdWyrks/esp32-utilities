@@ -105,10 +105,18 @@ namespace NavigationModule
             _CloseUnlocked();
         }
 
-        // Single-word reads — safe to skip the lock. Callers that need an
-        // atomic (IsOpen && Lookup) pair should just call Lookup, which
-        // re-checks under the lock.
-        static bool     IsOpen()     { return (bool)_DbState().file; }
+        // Snapshot reads for status/RPC reporting. IsOpen() inspects the File
+        // handle, which the RPC upload handlers close and reopen under the
+        // lock, so it takes the lock too rather than reading a shared_ptr that
+        // another task may be resetting. Callers that need an atomic
+        // (open && lookup) pair use getWifiLocation()/Lookup(), which
+        // re-check under the lock.
+        static bool IsOpen()
+        {
+            DbState &s = _DbState();
+            Lock lock(s.mutex);
+            return (bool)s.file;
+        }
         static uint32_t Count()      { return _DbState().count; }
         static uint8_t  BucketBits() { return _DbState().bucketBits; }
 
@@ -117,6 +125,54 @@ namespace NavigationModule
         {
             DbState &s = _DbState();
             Lock lock(s.mutex);
+            return _LookupUnlocked(bssid, lat, lng);
+        }
+
+        // Entry point WiFiGeolocator calls, once per scanned AP. bssid is the
+        // 6-byte BSSID as returned by WiFi.BSSID(i); lat/lng are filled when it
+        // is known. Lazily opens the default DB once if the app hasn't opened
+        // one — running once per AP, a missing DB must not re-attempt the open
+        // every call, so the latch makes it one-shot. Prefer calling Open() at
+        // init to control the path and get a clear boot-time log.
+        //
+        // The open check, the auto-open and the lookup all happen under one
+        // hold of the lock, so an RPC upload closing the file on the RPC task
+        // can't slip in between them.
+        static bool getWifiLocation(uint8_t *bssid, double &lat, double &lng)
+        {
+            DbState &s = _DbState();
+            Lock lock(s.mutex);
+
+            if (!s.file)
+            {
+                if (s.autoOpenAttempted)
+                {
+                    return false;
+                }
+                s.autoOpenAttempted = true;
+                if (!_OpenUnlocked(DEFAULT_PATH))
+                {
+                    return false;
+                }
+            }
+            return _LookupUnlocked(bssid, lat, lng);
+        }
+
+        // Clears the one-shot latch above so the next getWifiLocation() reopens
+        // the file. The RPC handlers call this after a clear/insert, otherwise a
+        // freshly written DB would stay unreachable until reboot.
+        static void ResetAutoOpenLatch()
+        {
+            DbState &s = _DbState();
+            Lock lock(s.mutex);
+            s.autoOpenAttempted = false;
+        }
+
+    private:
+        // Lookup body. Caller must hold _DbState().mutex.
+        static bool _LookupUnlocked(const uint8_t *bssid, double &lat, double &lng)
+        {
+            DbState &s = _DbState();
 
             if (!s.file || s.count == 0)
             {
@@ -170,34 +226,7 @@ namespace NavigationModule
             return false;
         }
 
-        // Entry point WiFiGeolocator calls, once per scanned AP. bssid is the
-        // 6-byte BSSID as returned by WiFi.BSSID(i); lat/lng are filled when it
-        // is known. Lazily opens the default DB once if the app hasn't opened
-        // one — running once per AP, a missing DB must not re-attempt the open
-        // every call, so the latch makes it one-shot. Prefer calling Open() at
-        // init to control the path and get a clear boot-time log.
-        static bool getWifiLocation(uint8_t *bssid, double &lat, double &lng)
-        {
-            if (!IsOpen())
-            {
-                if (_DbState().autoOpenAttempted)
-                {
-                    return false;
-                }
-                _DbState().autoOpenAttempted = true;
-                if (!Open(DEFAULT_PATH))
-                {
-                    return false;
-                }
-            }
-            return Lookup(bssid, lat, lng);
-        }
-
-        // Clears the one-shot latch above so the next LookupAutoOpen() reopens
-        // the file. The RPC handlers call this after a clear/insert, otherwise a
-        // freshly written DB would stay unreachable until reboot.
-        static void ResetAutoOpenLatch() { _DbState().autoOpenAttempted = false; }
-
+    public:
         // Close the read handle and remove the file. Returns true if the file
         // was gone (or never existed) afterwards.
         static bool Clear(const char *path = DEFAULT_PATH)
@@ -408,15 +437,27 @@ namespace NavigationModule
                                    ? DEFAULT_PATH
                                    : doc["path"].as<const char *>();
 
-            if (!IsOpen())
+            bool     open       = false;
+            uint32_t count      = 0;
+            uint8_t  bucketBits = 0;
             {
-                Open(path);
+                // One hold of the lock for the open-if-needed and the snapshot,
+                // so the poll task's lookups can't interleave with either.
+                DbState &s = _DbState();
+                Lock lock(s.mutex);
+                if (!s.file)
+                {
+                    _OpenUnlocked(path);
+                }
+                open       = (bool)s.file;
+                count      = s.count;
+                bucketBits = s.bucketBits;
             }
 
             doc.clear();
-            doc["open"]        = IsOpen();
-            doc["count"]       = Count();
-            doc["bucket_bits"] = BucketBits();
+            doc["open"]        = open;
+            doc["count"]       = count;
+            doc["bucket_bits"] = bucketBits;
         }
 
     private:

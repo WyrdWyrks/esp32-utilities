@@ -18,6 +18,14 @@ namespace NavigationModule
         static constexpr const char* TAG = "NavigationManager";
         bool _pollingStarted = false;
 
+        // The poll task is where every registered GeolocationInterface runs.
+        // WiFiGeolocator brings the WiFi driver up (esp_wifi_init/start), runs
+        // a blocking scan, then tears it all down again (esp_wifi_stop/deinit)
+        // on every cycle, and the LittleFS lookups and float formatting sit on
+        // top of that. 4 KB was not enough headroom for that path; 8 KB
+        // matches the RPC and mesh tasks, which do comparable work.
+        static constexpr uint32_t POLL_TASK_STACK_BYTES = 8192;
+
     public:
         Manager() {}
 
@@ -57,7 +65,7 @@ namespace NavigationModule
             NavigationModule::Utilities::SetLocationMaxAge(maxAgeMs);
             NavigationModule::Utilities::EnableLocationCache(true);
 
-            System_Utils::registerTask([](void*) {
+            int taskId = System_Utils::registerTask([](void*) {
                 // Own handle registered so RequestSourceRefresh() can wake
                 // this task early (e.g. from the geolocation debug screen)
                 // instead of waiting out the full poll interval.
@@ -69,7 +77,22 @@ namespace NavigationModule
                     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(
                         NavigationModule::Utilities::PollIntervalMs()));
                 }
-            }, "Location Poll", 4096, nullptr, 1);
+            }, "Location Poll", POLL_TASK_STACK_BYTES, nullptr, 1);
+
+            // Surface this task's stack headroom on the "Diagnostic Info"
+            // screen. The WiFi geolocator runs the whole WiFi driver
+            // init/scan/deinit cycle on this stack, so a shrinking number here
+            // is the early warning for the overflow that used to be silent.
+            TaskHandle_t pollTask = System_Utils::getTask(taskId);
+            if (pollTask != nullptr)
+            {
+                System_Utils::registerDiagnosticsProvider([pollTask]() -> std::vector<std::string> {
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "Poll Stk: %lu",
+                             static_cast<unsigned long>(uxTaskGetStackHighWaterMark(pollTask)));
+                    return { std::string(buf) };
+                });
+            }
 
             _pollingStarted = true;
             ESP_LOGI(TAG, "Started location polling (interval %u ms, max-age %u ms)",

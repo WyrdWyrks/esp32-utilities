@@ -8,6 +8,7 @@
 #include "SystemUtilities.hpp"
 #include "VersionUtils.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -79,14 +80,26 @@ namespace DisplayModule
             snprintf(buf, sizeof(buf), "FW: %s", FIRMWARE_VERSION_STRING);
             lines.emplace_back(buf);
 
-            // Heap free with unit scaling
-            uint32_t heap = ESP.getFreeHeap();
-            const char *units = "b";
-            if (heap > 1024) { heap >>= 10; units = "Kb"; }
-            if (heap > 1024) { heap >>= 10; units = "Mb"; }
+            // Why the last boot happened. Distinguishes a brownout (power rail
+            // sagging under a WiFi/LoRa TX burst) from a panic or a watchdog,
+            // which is the first question when a device reboots on its own.
+            snprintf(buf, sizeof(buf), "Reset: %s", _ResetReasonLabel(esp_reset_reason()));
+            lines.emplace_back(buf);
 
-            snprintf(buf, sizeof(buf), "Heap: %lu%s",
-                     static_cast<unsigned long>(heap), units);
+            // Time since that boot. Read against the reset reason: a device that
+            // says Brownout with a short uptime every visit is resetting in a
+            // loop; one that has been up for days just had a one-off.
+            _FormatUptime(buf, sizeof(buf));
+            lines.emplace_back(buf);
+
+            // Heap free with unit scaling
+            _FormatBytes(buf, sizeof(buf), "Heap: ", ESP.getFreeHeap());
+            lines.emplace_back(buf);
+
+            // Lowest the free heap has been since boot — a number that keeps
+            // falling between visits is a leak or fragmentation on its way to
+            // an allocation failure.
+            _FormatBytes(buf, sizeof(buf), "Min Heap: ", ESP.getMinFreeHeap());
             lines.emplace_back(buf);
 
             // Fragmentation: 1 - (maxContiguous / freeHeap). 0% means all free
@@ -122,6 +135,56 @@ namespace DisplayModule
                     std::move(line),
                     TextFormat{ TextAlignH::LEFT, TextAlignV::LINE, displayLine++ }
                 ));
+            }
+        }
+
+        // "<label><N><unit>" with the same b/Kb/Mb scaling the heap line has
+        // always used.
+        static void _FormatBytes(char *buf, size_t bufLen, const char *label, uint32_t bytes)
+        {
+            const char *units = "b";
+            if (bytes > 1024) { bytes >>= 10; units = "Kb"; }
+            if (bytes > 1024) { bytes >>= 10; units = "Mb"; }
+            snprintf(buf, bufLen, "%s%lu%s", label, static_cast<unsigned long>(bytes), units);
+        }
+
+        // "Up: 1d 02:34:56" (days only once there are any). Uses the 64-bit
+        // esp_timer clock rather than millis(), which wraps after 49 days.
+        static void _FormatUptime(char *buf, size_t bufLen)
+        {
+            uint64_t secs = static_cast<uint64_t>(esp_timer_get_time() / 1000000LL);
+            unsigned days = static_cast<unsigned>(secs / 86400);
+            unsigned h    = static_cast<unsigned>((secs / 3600) % 24);
+            unsigned m    = static_cast<unsigned>((secs / 60) % 60);
+            unsigned s    = static_cast<unsigned>(secs % 60);
+            if (days > 0)
+            {
+                snprintf(buf, bufLen, "Up: %ud %02u:%02u:%02u", days, h, m, s);
+            }
+            else
+            {
+                snprintf(buf, bufLen, "Up: %02u:%02u:%02u", h, m, s);
+            }
+        }
+
+        // Short labels so "Reset: " + label fits the 21-character line. Only
+        // the reasons every supported IDF defines; anything newer reads Other.
+        static const char *_ResetReasonLabel(esp_reset_reason_t reason)
+        {
+            switch (reason)
+            {
+                case ESP_RST_POWERON:   return "Power On";
+                case ESP_RST_EXT:       return "External";
+                case ESP_RST_SW:        return "Software";
+                case ESP_RST_PANIC:     return "Panic";
+                case ESP_RST_INT_WDT:   return "Int WDT";
+                case ESP_RST_TASK_WDT:  return "Task WDT";
+                case ESP_RST_WDT:       return "Other WDT";
+                case ESP_RST_DEEPSLEEP: return "Deep Sleep";
+                case ESP_RST_BROWNOUT:  return "Brownout";
+                case ESP_RST_SDIO:      return "SDIO";
+                case ESP_RST_UNKNOWN:   return "Unknown";
+                default:                return "Other";
             }
         }
     };

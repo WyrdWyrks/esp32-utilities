@@ -16,6 +16,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <LittleFS.h>
 
 #include <ArduinoJson.h>
@@ -394,9 +395,19 @@ namespace LoraModule
             msg->deserialize(doc);                // base fields: sender/msgID/time/date
             if (!msg->IsValid()) { return; }
 
-            // MeshCore's dedup dropped repeats before we got here, so every
-            // delivery is new.
-            LoraModule::Utilities::MessageTypeReceived(guid).Invoke(msg, true);
+            // isNew is an app-layer signal, distinct from MeshCore's own
+            // wire-level packet dedup (MeshTables, hashed over type+payload).
+            // A live beacon (RepeatMessageState) resends the *same* msgID every
+            // tick with a fresh lat/lng/time -- different payload bytes each
+            // time, so MeshTables happily delivers every one. Without this
+            // sender-keyed check, every position update would re-fire a "new
+            // message" notification instead of just the first. Mirrors the
+            // legacy engine's RoutingMap/MessageExists.
+            auto it = _lastDeliveredMsgId.find(msg->sender);
+            bool isNew = (it == _lastDeliveredMsgId.end() || it->second != msg->msgID);
+            _lastDeliveredMsgId[msg->sender] = msg->msgID;
+
+            LoraModule::Utilities::MessageTypeReceived(guid).Invoke(msg, isNew);
         }
 
     private:
@@ -455,6 +466,10 @@ namespace LoraModule
         bool               _repeat = true;
         bool               _retuning = false;
         QueueHandle_t      _sendQueue = nullptr;
+
+        // sender -> last-delivered msgID, for onGroupDataRecv's isNew signal.
+        // Mesh task only.
+        std::unordered_map<uint32_t, uint32_t> _lastDeliveredMsgId;
 
         // Sole Manager instance (one per firmware, wired by BootstrapLora).
         // Lets LoraUtilities::UpdateSettings() reach SetChannelKey() without the
