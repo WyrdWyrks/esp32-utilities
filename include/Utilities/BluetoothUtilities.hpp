@@ -31,10 +31,17 @@ namespace BluetoothModule
             return device_name;
         }
 
+        class RpcCharacteristicCallbacks;
+        inline RpcCharacteristicCallbacks &RpcCallbacks();
+        inline void ResetRpcBuffers();
+
         class SystemBLEServer : public NimBLEServerCallbacks {
             void onConnect(BLEServer* pServer, NimBLEConnInfo& connInfo) override {
                 // Require all connections to be paired.
                 ESP_LOGI("SystemBLEServer", "Client connected, starting security");
+                // Drop any half-received request or unread response left over
+                // from a previous connection.
+                ResetRpcBuffers();
                 BLEDevice::startSecurity(connInfo.getConnHandle());
                 gBluetoothConnected = true;
             }
@@ -42,16 +49,17 @@ namespace BluetoothModule
             void onDisconnect(BLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
                 // Start advertising again after the old client disconnects.
                 BLEDevice::startAdvertising();
+                ResetRpcBuffers();
                 gBluetoothConnected = false;
+                gBluetoothPaired = false;
             }
 
             void onAuthenticationComplete(NimBLEConnInfo& connInfo) override {
-                ESP_LOGI("SystemBLEServer", "Authentication complete for client");
-                if (connInfo.isBonded()) {
-                    gBluetoothPaired = true;
-                } else {
-                    gBluetoothPaired = false;
-                }
+                ESP_LOGI("SystemBLEServer", "Authentication complete: encrypted=%d authenticated=%d bonded=%d",
+                         connInfo.isEncrypted(), connInfo.isAuthenticated(), connInfo.isBonded());
+                // The RPC characteristic only needs an encrypted, authenticated
+                // (MITM) link. Not every client bonds, so don't require it.
+                gBluetoothPaired = connInfo.isEncrypted() && connInfo.isAuthenticated();
             }
 
             uint32_t onPassKeyDisplay() override {
@@ -78,6 +86,12 @@ namespace BluetoothModule
         class RpcCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 
         public:
+            void reset() {
+                _incomingPacketBufferIndex = 0;
+                _outgoingPacketBufferIndex = 0;
+                _outgoingPacketSize = 0;
+            }
+
             void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override {
                 // RPC requests come in here.
                 NimBLEAttValue data = pCharacteristic->getValue();
@@ -169,6 +183,20 @@ namespace BluetoothModule
             uint32_t _outgoingPacketBufferIndex = 0;
             uint32_t _outgoingPacketSize = 0;
         };
+
+        // Static so it persists across deinit/reinit cycles (NimBLECharacteristic
+        // never deletes its callbacks) and so the ~8 KB of buffers aren't
+        // reallocated on every visit to the BT screen.
+        inline RpcCharacteristicCallbacks &RpcCallbacks()
+        {
+            static RpcCharacteristicCallbacks callbacks;
+            return callbacks;
+        }
+
+        inline void ResetRpcBuffers()
+        {
+            RpcCallbacks().reset();
+        }
     } // namespace detail
 } // namespace BluetoothModule
 
@@ -211,10 +239,8 @@ public:
         //     BLEDevice::deinit() would delete a static object and corrupt the
         //     heap (crash on leaving the BT screen).
         //   - NimBLECharacteristic never deletes its callbacks, so the RPC
-        //     callback is safe as-is (and static avoids leaking its ~8 KB
-        //     buffers on every visit).
+        //     callback (see RpcCallbacks()) is safe as-is.
         static SystemBLEServer serverCallbacks;
-        static RpcCharacteristicCallbacks rpcCallbacks;
 
         BLEServer* pServer = BLEDevice::createServer();
         pServer->setCallbacks(&serverCallbacks, false); // false: don't delete our static object
@@ -230,14 +256,21 @@ public:
             NIMBLE_PROPERTY::READ_AUTHEN |
             NIMBLE_PROPERTY::WRITE_AUTHEN
         );
-        pRpcCharacteristic->setCallbacks(&rpcCallbacks);
+        pRpcCharacteristic->setCallbacks(&RpcCallbacks());
 
         // NimBLEService::start() is deprecated and has no effect; services are
         // started automatically when the server starts advertising.
 
+        // An advertising packet is only 31 bytes, and NimBLE silently drops
+        // whatever doesn't fit: flags (3) + a "Wayfinder_XXXX" name (16) left
+        // no room for the 128-bit service UUID (18) the web companion filters
+        // on. Enable the scan response first so setName() puts the name there
+        // (up to 29 chars), leaving flags + UUID + appearance (25) in the
+        // advertisement itself.
         BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
-        pAdvertising->setName(_DeviceName().c_str());
+        pAdvertising->enableScanResponse(true);
         pAdvertising->addServiceUUID(DEGEN_SERVICE_UUID);
+        pAdvertising->setName(_DeviceName());
         // Show up with a watch icon lol.
         constexpr uint16_t BLE_APPEARANCE_GENERIC_WATCH = 192;
         pAdvertising->setAppearance(BLE_APPEARANCE_GENERIC_WATCH);
