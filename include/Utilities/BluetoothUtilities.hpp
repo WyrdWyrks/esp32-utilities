@@ -90,29 +90,42 @@ namespace BluetoothModule
                 _incomingPacketBufferIndex = 0;
                 _outgoingPacketBufferIndex = 0;
                 _outgoingPacketSize = 0;
+                _incomingOverflowed = false;
             }
 
             void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override {
                 // RPC requests come in here.
                 NimBLEAttValue data = pCharacteristic->getValue();
-                uint32_t payload_size = data.length() - 1;
-                ESP_LOGI("[BLE]", "Incoming RPC packet size: %u", payload_size);
-
-                if (payload_size + _incomingPacketBufferIndex > MAX_BLE_RPC_PACKET_SIZE) {
-                    // Overflow, reset buffer
-                    _incomingPacketBufferIndex = 0;
-                    ESP_LOGW("RpcCharacteristicCallbacks", "Incoming RPC packet overflow, resetting buffer");
+                if (data.length() < 1) {
                     return;
                 }
 
-                memcpy(&_incomingPacketBuffer[_incomingPacketBufferIndex], &data.c_str()[1], payload_size);
-                _incomingPacketBufferIndex += payload_size;
+                uint32_t payload_size = data.length() - 1;
+                ESP_LOGI("[BLE]", "Incoming RPC packet size: %u", payload_size);
+
+                // Once a request overflows, discard the rest of its fragments
+                // rather than restarting mid-stream and parsing a tail of it.
+                if (!_incomingOverflowed && payload_size + _incomingPacketBufferIndex > MAX_BLE_RPC_PACKET_SIZE) {
+                    ESP_LOGW("RpcCharacteristicCallbacks", "Incoming RPC request exceeds %u bytes, discarding it",
+                             (unsigned)MAX_BLE_RPC_PACKET_SIZE);
+                    _incomingOverflowed = true;
+                }
+
+                if (!_incomingOverflowed) {
+                    memcpy(&_incomingPacketBuffer[_incomingPacketBufferIndex], &data.c_str()[1], payload_size);
+                    _incomingPacketBufferIndex += payload_size;
+                }
 
                 // First byte tells us if more data is coming.
                 bool moreComing = data[0];
                 if (!moreComing) {
-                    processIncomingRpc();
+                    if (_incomingOverflowed) {
+                        replyWithReturnCode(RpcModule::RpcReturnCode::RPC_FUNCTION_ERROR);
+                    } else {
+                        processIncomingRpc();
+                    }
                     _incomingPacketBufferIndex = 0;
+                    _incomingOverflowed = false;
                 }
             }
 
@@ -122,6 +135,7 @@ namespace BluetoothModule
                 DeserializationError error = deserializeMsgPack(doc, _incomingPacketBuffer, _incomingPacketBufferIndex);
                 if (error) {
                     ESP_LOGW("[BLE]", "Failed to deserialize incoming RPC packet");
+                    replyWithReturnCode(RpcModule::RpcReturnCode::RPC_FUNCTION_ERROR);
                     return;
                 }
 
@@ -143,6 +157,7 @@ namespace BluetoothModule
                 size_t packedSize = measureMsgPack(doc);
                 if (packedSize > MAX_BLE_RPC_PACKET_SIZE) {
                     ESP_LOGW("[BLE]", "Outgoing RPC packet too large");
+                    replyWithReturnCode(RpcModule::RpcReturnCode::RPC_FUNCTION_ERROR);
                     return;
                 }
                 _outgoingPacketBufferIndex = 0;
@@ -153,6 +168,16 @@ namespace BluetoothModule
                 ESP_LOGI("[BLE]", "Sending RPC response: %s", debugStr.c_str());
 
                 serializeMsgPack(doc, _outgoingPacketBuffer, packedSize);
+            }
+
+            // Queues a bare {"R": code} reply, so the client gets an error for
+            // a request that couldn't be handled instead of an empty read (or
+            // the previous request's response).
+            void replyWithReturnCode(RpcModule::RpcReturnCode code) {
+                JsonDocument doc;
+                doc[RpcModule::Utilities::RPC_RETURN_CODE_FIELD()] = (int)code;
+                _outgoingPacketSize = serializeMsgPack(doc, _outgoingPacketBuffer, MAX_BLE_RPC_PACKET_SIZE);
+                _outgoingPacketBufferIndex = 0;
             }
 
             void onRead(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override {
@@ -182,6 +207,8 @@ namespace BluetoothModule
             uint8_t _outgoingPacketBuffer[MAX_BLE_RPC_PACKET_SIZE];
             uint32_t _outgoingPacketBufferIndex = 0;
             uint32_t _outgoingPacketSize = 0;
+
+            bool _incomingOverflowed = false;
         };
 
         // Static so it persists across deinit/reinit cycles (NimBLECharacteristic
