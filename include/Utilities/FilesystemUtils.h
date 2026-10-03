@@ -229,7 +229,11 @@ namespace FilesystemModule
                 auto obj = doc.as<ArduinoJson::JsonObjectConst>();
                 setting->fromJson(obj);
                 setting->saveToPreferences(SettingsPreference());
-                ESP_LOGI(TAG, "Updated setting: %s to %s", key.c_str(), doc["SettingValue"].as<const char*>());
+                // SettingValue may be a number or bool, where as<const char*>()
+                // is nullptr and %s would crash in the ROM printf's strlen.
+                std::string valueStr;
+                serializeJson(doc["SettingValue"], valueStr);
+                ESP_LOGI(TAG, "Updated setting: %s to %s", key.c_str(), valueStr.c_str());
 
                 doc.clear();
                 doc["Success"] = true;
@@ -271,7 +275,9 @@ namespace FilesystemModule
                     auto obj = entry.as<JsonObjectConst>();
                     s->fromJson(obj);
                     s->saveToPreferences(prefs);
-                    ESP_LOGI(TAG, "Updated setting: %s to %s", key.c_str(), entry["SettingValue"].as<const char*>());
+                    std::string valueStr;
+                    serializeJson(entry["SettingValue"], valueStr);
+                    ESP_LOGI(TAG, "Updated setting: %s to %s", key.c_str(), valueStr.c_str());
                 }
 
                 SettingsPreference().end();
