@@ -6,7 +6,7 @@
 #include "WindowState.hpp"
 #include "TextDrawCommand.hpp"
 #include "NavigationUtils.h"
-#include "LED_Utils.h"
+#include "LedUtilities.hpp"
 #include "ScrollWheel.hpp"
 
 namespace DisplayModule
@@ -89,8 +89,8 @@ namespace DisplayModule
             }
 
             _it            = _locations.begin();
-            _scrollWheelID = ScrollWheel::RegisteredPatternID();
-            LED_Utils::enablePattern(_scrollWheelID);
+            _scrollWheelID = UxModule::ScrollWheel::RegisteredPatternID();
+            UxModule::LedUtilities::enablePattern(_scrollWheelID);
 
             _rebuildDrawCommands();
         }
@@ -100,7 +100,7 @@ namespace DisplayModule
             // disablePattern() clears the pattern's own segment via the
             // LedPatternInterface (pattern->clearPattern() -> _segment.clear()),
             // so the state never needs to know which physical LEDs it used.
-            LED_Utils::disablePattern(_scrollWheelID);
+            UxModule::LedUtilities::disablePattern(_scrollWheelID);
             WindowState::onExit();
         }
 
@@ -148,8 +148,8 @@ namespace DisplayModule
                     ArduinoJson::JsonDocument cfg;
                     cfg["numItems"] = _locations.size();
                     cfg["currItem"] = std::distance(_locations.begin(), _it);
-                    LED_Utils::configurePattern(_scrollWheelID, cfg);
-                    LED_Utils::iteratePattern(_scrollWheelID);
+                    UxModule::LedUtilities::configurePattern(_scrollWheelID, cfg);
+                    UxModule::LedUtilities::iteratePattern(_scrollWheelID);
                 }
             }
             else

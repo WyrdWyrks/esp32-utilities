@@ -115,8 +115,8 @@ namespace DisplayModule
             _index = 0;
             _updateScrollLabels();
 
-            _scrollWheelPatternId = ScrollWheel::RegisteredPatternID();
-            LED_Utils::enablePattern(_scrollWheelPatternId);
+            _scrollWheelPatternId = UxModule::ScrollWheel::RegisteredPatternID();
+            UxModule::LedUtilities::enablePattern(_scrollWheelPatternId);
             
             _configureLed();
             _rebuildDrawCommands();
@@ -126,8 +126,8 @@ namespace DisplayModule
         {
             if (_scrollWheelPatternId >= 0)
             {
-                LED_Utils::clearPattern(_scrollWheelPatternId);
-                LED_Utils::disablePattern(_scrollWheelPatternId);
+                UxModule::LedUtilities::clearPattern(_scrollWheelPatternId);
+                UxModule::LedUtilities::disablePattern(_scrollWheelPatternId);
             }
             WindowState::onExit();
         }
@@ -185,8 +185,8 @@ namespace DisplayModule
         {
             if (_scrollWheelPatternId >= 0)
             {
-                LED_Utils::clearPattern(_scrollWheelPatternId);
-                LED_Utils::disablePattern(_scrollWheelPatternId);
+                UxModule::LedUtilities::clearPattern(_scrollWheelPatternId);
+                UxModule::LedUtilities::disablePattern(_scrollWheelPatternId);
             }
         }
 
@@ -194,7 +194,7 @@ namespace DisplayModule
         {
             if (_scrollWheelPatternId >= 0)
             {
-                LED_Utils::enablePattern(_scrollWheelPatternId);
+                UxModule::LedUtilities::enablePattern(_scrollWheelPatternId);
                 _configureLed();
             }
         }
@@ -232,8 +232,8 @@ namespace DisplayModule
                 cfg["numItems"] = _items.size();
                 cfg["currItem"] = _index; 
 
-                LED_Utils::configurePattern(_scrollWheelPatternId, cfg);
-                LED_Utils::iteratePattern(_scrollWheelPatternId);
+                UxModule::LedUtilities::configurePattern(_scrollWheelPatternId, cfg);
+                UxModule::LedUtilities::iteratePattern(_scrollWheelPatternId);
             }
         }
 

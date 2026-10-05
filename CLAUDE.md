@@ -17,11 +17,11 @@ Include paths are explicitly set in `platformio.ini` build_flags — all `includ
 ```
 esp32-utilities/
 ├── include/                    # Public headers (mirrors src/)
-│   ├── Interfaces/             # Abstract interfaces (LED_Pattern_Interface, DrawCommandInterface, etc.)
+│   ├── Interfaces/             # Abstract interfaces (LedPatternInterface, DrawCommandInterface, etc.)
 │   ├── ModuleManagers/         # Top-level system managers
 │   ├── HelperClasses/
 │   │   ├── DrawCommands/       # UI drawing primitives
-│   │   ├── LED_Patterns/       # WS2812B animation patterns
+│   │   ├── LED/                # LedSegment + Patterns/ (WS2812B patterns, UxModule)
 │   │   ├── Message_Types/      # LoRa message type definitions
 │   │   ├── Network/            # Network communication classes
 │   │   ├── OLED_Content/       # Screen content renderers
@@ -40,7 +40,7 @@ esp32-utilities/
 ```
 Application Project
     ↓
-ModuleManagers (Display, LED, LoRa, GPS, Settings, Filesystem, Rpc)
+ModuleManagers (Display, Ux, LoRa, GPS, Settings, Filesystem, Rpc)
     ↓
 HelperClasses (Windows, States, Content, Patterns, Messages)
     ↓
@@ -52,7 +52,7 @@ Utilities + Interfaces
 | Manager | Responsibility |
 |---|---|
 | `Display_Manager` | OLED orchestration, window/state stack, input routing via FreeRTOS queue |
-| `LED_Manager` | WS2812B animation, compass ring rendering, pattern registration |
+| `UxModule::LedManager` | WS2812B strip bootstrap and the LED task, buzzer, haptic motor. `UxModule::LedUtilities` is the pattern registry (register, configure, loop, enable, priority). `UxModule` holds several subsystems, so its classes carry a subsystem prefix (`LedManager`/`LedUtilities`, files `LedManager.hpp`/`LedUtilities.hpp`); the display is planned to move here as its own pair. |
 | `Settings_Manager` | JSON settings persistence (LittleFS) |
 | `LoraModule::Manager` | LoRa mesh networking (`: mesh::Mesh`, MeshCore engine); group-channel datagrams, forwarding, identity, "LoRa Channel" retune. `LoraModule::Utilities` is the app-facing façade. |
 | `NavigationModule::Manager` | GPS + compass integration, heading/distance calculation |
@@ -64,14 +64,14 @@ Utilities + Interfaces
 - **Singleton:** All managers use static class members (FreeRTOS-safe)
 - **State Machine:** `Window_State` + `OLED_Window` implement a state stack for display navigation
 - **Queue-Driven:** Display commands flow through FreeRTOS queues; inputs mapped to callbacks via `std::map<uint32_t, callbackPointer>`
-- **Interface/Plugin:** `LED_Pattern_Interface` and `DrawCommandInterface` allow registering new behaviors without modifying managers
+- **Interface/Plugin:** `UxModule::LedPatternInterface` and `DrawCommandInterface` allow registering new behaviors without modifying managers
 - **Type registry:** `LoraModule::Utilities::RegisterMessageType(guid, creator)` maps a LoRa message type's schema GUID to a factory; the wire carries a 1-byte tag (`guid & 0xFF`) that `CreatorForTag()` resolves on receive
-- **Task ownership:** `MessageTypeReceived(guid)` handlers run on the mesh task, `SettingsUpdated()` handlers on whichever task changed the setting (RPC or display), and `GeolocationInterface`/`TimeSourceInterface` calls can come from the poll, display and mesh tasks. Only the display task may touch the window stack, draw-command lists or the framebuffer: to show data that changed elsewhere, call `DisplayModule::Utilities::sendRefreshCommand()` (ticks the active window and renders on the display task; see `CompassUtils::PassMessageReceivedToDisplay` in the app), or `registerCallback()` + `sendCallbackCommand()` for arbitrary display-task work. Shared sources guard their own state (see `GpsSource`).
+- **Task ownership:** `MessageTypeReceived(guid)` handlers run on the mesh task, `SettingsUpdated()` handlers on whichever task changed the setting (RPC or display), and `GeolocationInterface`/`TimeSourceInterface` calls can come from the poll, display and mesh tasks. Only the display task may touch the window stack, draw-command lists or the framebuffer: to show data that changed elsewhere, call `DisplayModule::Utilities::sendRefreshCommand()` (ticks the active window and renders on the display task; see `CompassUtils::PassMessageReceivedToDisplay` in the app), or `registerCallback()` + `sendCallbackCommand()` for arbitrary display-task work. Shared sources guard their own state (see `GpsSource`). The LED strip is owned the same way: only the LED task (`UxModule::LedUtilities::iteratePatterns`) writes the strip buffer or calls `FastLED.show()`; other tasks go through `UxModule::LedUtilities`, which locks and wakes the task, and patterns never call `show()`.
 
 
 ## Coding Conventions
 
-- **Classes:** PascalCase with underscores for multi-word (`LED_Manager`, `OLED_Window`, `Window_State`)
+- **Classes:** PascalCase with underscores for multi-word (`OLED_Window`, `Window_State`)
 - **Constants/Defines:** `UPPER_CASE` (`DEBOUNCE_DELAY`, `NUM_COMPASS_LEDS`, `BUTTON_1_PIN`)
 - **Member variables:** camelCase; static members for class-level state
 - **Logging:** `ESP_LOG` macros (ESP-IDF style) — not `Serial.print`
@@ -99,9 +99,11 @@ Utilities + Interfaces
 ## Adding New Features
 
 ### New LED Pattern
-1. Create header in `include/HelperClasses/LED_Patterns/` inheriting `LED_Pattern_Interface`
-2. Implement in `src/HelperClasses/LED_Patterns/`
-3. Register with `LED_Manager`
+1. Create a header-only class in `include/HelperClasses/LED/Patterns/` (app-side: `Celestial-Wayfinder/include/HelperClasses/Led/Patterns/`), inside `namespace UxModule`, inheriting `UxModule::LedPatternInterface`
+2. Draw only through `_segment` in `iterateFrame()`/`clearPattern()`. Registration rebinds the segment to the pattern's private layer; never touch the strip buffer or call `FastLED.show()`
+3. Override `isActive()` if the pattern should only claim its LEDs part of the time (mid-animation, switched on); otherwise an enabled pattern always covers lower layers, black included
+4. Register with `UxModule::LedUtilities::registerPattern(&pattern, UxModule::LedPriority::<tier>)`. Each LED shows the highest-priority enabled + active pattern covering it: `BACKGROUND` (screen indicators) < `FEEDBACK` (press/trace) < `OVERLAY` (flashlight) < `MODAL` (lock screen); ties go to the later registration
+5. Drive it with `configurePattern` + `iteratePattern` (one frame) or `loopPattern` (n loops, -1 forever). Configure and iterate may happen before `enablePattern`; the frame is drawn once it is enabled
 
 ### New Window
 1. Create header in `include/HelperClasses/OLED_Window/` inheriting `OLED_Window`

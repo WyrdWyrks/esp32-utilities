@@ -6,8 +6,8 @@
 #include "WindowState.hpp"
 #include "DisplayUtilities.hpp"
 #include "TextDrawCommand.hpp"
+#include "LedUtilities.hpp"
 #include "IlluminateButton.hpp"
-#include "ButtonFlash.hpp"
 
 namespace DisplayModule
 {
@@ -86,16 +86,16 @@ namespace DisplayModule
             _step = 0;
             _rebuildDrawCommands();
             onSequenceReset();
-            LED_Utils::disablePattern(ButtonFlash::RegisteredPatternID());
-            _illuminateID = IlluminateButton::RegisteredPatternID();
-            LED_Utils::enablePattern(_illuminateID);
+            // IlluminateButton is registered at MODAL priority, so while it is
+            // enabled it owns the button LEDs and press feedback can't touch them.
+            _illuminateID = UxModule::IlluminateButton::RegisteredPatternID();
+            UxModule::LedUtilities::enablePattern(_illuminateID);
             _configureLed();
         }
 
         void onExit() override
         {
-            LED_Utils::disablePattern(_illuminateID);
-            LED_Utils::enablePattern(ButtonFlash::RegisteredPatternID());
+            UxModule::LedUtilities::disablePattern(_illuminateID);
             WindowState::onExit();
         }
 
@@ -199,8 +199,8 @@ namespace DisplayModule
                 }
             }            
 
-            LED_Utils::configurePattern(_illuminateID, cfg);
-            LED_Utils::iteratePattern(_illuminateID);
+            UxModule::LedUtilities::configurePattern(_illuminateID, cfg);
+            UxModule::LedUtilities::iteratePattern(_illuminateID);
         }
     };
 

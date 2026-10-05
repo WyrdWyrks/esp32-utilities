@@ -3,7 +3,7 @@
 #include <Adafruit_GFX.h>
 #include "DisplayUtilities.hpp"
 #include "SystemUtilities.hpp"
-#include "LED_Manager.h"
+#include "LedManager.hpp"
 
 namespace DisplayModule
 {
@@ -112,7 +112,7 @@ namespace DisplayModule
                             lastButtonPressTick = now;
 
                             // haptic feedback
-                            LED_Manager::applyHapticFeedback(150);
+                            // UxModule::LedManager::applyHapticFeedback(150);
 
                             // Drain duplicates that arrived during the debounce window
                             xQueueReset(Utilities::getDisplayCommandQueue());

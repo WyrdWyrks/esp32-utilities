@@ -5,79 +5,81 @@
 #include <vector>
 #include <algorithm>
 
-
-class IlluminateButton : public LedPatternInterface
+namespace UxModule
 {
-public:
-    // inputIds are sorted ascending and auto-mapped to LEDs in the segment:
-    // smallest inputId -> segment[0], next -> segment[1], etc.
-    IlluminateButton(LedSegment segment, std::vector<uint8_t> inputIds)
-        : LedPatternInterface(std::move(segment))
+    class IlluminateButton : public LedPatternInterface
     {
-        std::vector<uint8_t> sorted = inputIds;
-        std::sort(sorted.begin(), sorted.end());
-        for (size_t i = 0; i < sorted.size(); i++)
+    public:
+        // inputIds are sorted ascending and auto-mapped to LEDs in the segment:
+        // smallest inputId -> segment[0], next -> segment[1], etc.
+        IlluminateButton(LedSegment segment, std::vector<uint8_t> inputIds)
+            : LedPatternInterface(std::move(segment))
         {
-            _inputIdSegIdx[sorted[i]] = i;
-            _inputIdState[sorted[i]] = false;
+            std::vector<uint8_t> sorted = inputIds;
+            std::sort(sorted.begin(), sorted.end());
+            for (size_t i = 0; i < sorted.size(); i++)
+            {
+                _inputIdSegIdx[sorted[i]] = i;
+                _inputIdState[sorted[i]] = false;
+            }
+
+            animationTicks = 15;
         }
 
-        animationTicks = 15;
-    }
-
-    void configurePattern(JsonDocument &config)
-    {
-        if (!config["inputStates"].isNull())
+        void configurePattern(JsonDocument &config)
         {
-            for (auto kvp : config["inputStates"].as<JsonArray>())
+            if (!config["inputStates"].isNull())
             {
-                if (!kvp["input"].isNull() && !kvp["state"].isNull())
+                for (auto kvp : config["inputStates"].as<JsonArray>())
                 {
-                    _inputIdState[kvp["input"]] = kvp["state"];
+                    if (!kvp["input"].isNull() && !kvp["state"].isNull())
+                    {
+                        _inputIdState[kvp["input"]] = kvp["state"];
+                    }
                 }
             }
         }
-    }
 
-    bool iterateFrame()
-    {
-        ESP_LOGV(TAG, "Illuminate_Button::iterateFrame");
-        for (auto& kvp : _inputIdSegIdx)
+        bool iterateFrame()
         {
-            if (_inputIdState[kvp.first])
+            ESP_LOGV(TAG, "Illuminate_Button::iterateFrame");
+            for (auto& kvp : _inputIdSegIdx)
             {
-                _segment[kvp.second] = ThemeColor();
+                if (_inputIdState[kvp.first])
+                {
+                    _segment[kvp.second] = ThemeColor();
+                }
+                else
+                {
+                    _segment[kvp.second] = CRGB(0, 0, 0);
+                }
             }
-            else
+
+            return true;
+        }
+
+        void clearPattern()
+        {
+            LedPatternInterface::clearPattern();
+            for (auto& kvp : _inputIdState)
             {
-                _segment[kvp.second] = CRGB(0, 0, 0);
+                kvp.second = false;
             }
         }
 
-        return true;
-    }
+        void SetRegisteredPatternID(int patternID) { _RegisteredPatternId() = patternID; }
+        static int RegisteredPatternID() { return _RegisteredPatternId(); }
 
-    void clearPattern()
-    {
-        LedPatternInterface::clearPattern();
-        for (auto& kvp : _inputIdState)
+    protected:
+        static int &_RegisteredPatternId()
         {
-            kvp.second = false;
+            static int id = -1;
+            return id;
         }
-    }
 
-    void SetRegisteredPatternID(int patternID) { _RegisteredPatternId() = patternID; }
-    static int RegisteredPatternID() { return _RegisteredPatternId(); }
+        std::unordered_map<uint8_t, size_t> _inputIdSegIdx;
+        std::unordered_map<uint8_t, bool> _inputIdState;
 
-protected:
-    static int &_RegisteredPatternId()
-    {
-        static int id = -1;
-        return id;
-    }
-
-    std::unordered_map<uint8_t, size_t> _inputIdSegIdx;
-    std::unordered_map<uint8_t, bool> _inputIdState;
-
-    const char *TAG = "Illuminate_Button";
-};
+        const char *TAG = "Illuminate_Button";
+    };
+}

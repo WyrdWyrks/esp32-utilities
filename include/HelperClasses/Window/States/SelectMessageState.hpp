@@ -5,7 +5,7 @@
 #include <memory>
 #include "WindowState.hpp"
 #include "TextDrawCommand.hpp"
-#include "LED_Utils.h"
+#include "LedUtilities.hpp"
 #include "ScrollWheel.hpp"
 
 namespace DisplayModule
@@ -80,15 +80,15 @@ namespace DisplayModule
             }
 
             _it            = _messages.begin();
-            _scrollWheelID = ScrollWheel::RegisteredPatternID();
-            LED_Utils::enablePattern(_scrollWheelID);
+            _scrollWheelID = UxModule::ScrollWheel::RegisteredPatternID();
+            UxModule::LedUtilities::enablePattern(_scrollWheelID);
 
             _rebuildDrawCommands();
         }
 
         void onExit() override
         {
-            LED_Utils::disablePattern(_scrollWheelID);
+            UxModule::LedUtilities::disablePattern(_scrollWheelID);
             WindowState::onExit();
         }
 
@@ -134,8 +134,8 @@ namespace DisplayModule
                     ArduinoJson::JsonDocument cfg;
                     cfg["numItems"] = _messages.size();
                     cfg["currItem"] = std::distance(_messages.begin(), _it);
-                    LED_Utils::configurePattern(_scrollWheelID, cfg);
-                    LED_Utils::iteratePattern(_scrollWheelID);
+                    UxModule::LedUtilities::configurePattern(_scrollWheelID, cfg);
+                    UxModule::LedUtilities::iteratePattern(_scrollWheelID);
                 }
             }
             else

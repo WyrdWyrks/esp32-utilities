@@ -7,7 +7,7 @@
 #include "WindowState.hpp"
 #include "TextDrawCommand.hpp"
 #include "NavigationUtils.h"
-#include "LED_Utils.h"
+#include "LedUtilities.hpp"
 #include "RingPoint.hpp"
 
 namespace { constexpr size_t MAX_LOCATION_NAME_LENGTH = 21; }
@@ -105,8 +105,8 @@ namespace DisplayModule
                 _selectedIt = NavigationUtils::GetSavedLocationsBegin();
             }
 
-            _ringPointID = RingPoint::RegisteredPatternID();
-            LED_Utils::enablePattern(_ringPointID);
+            _ringPointID = UxModule::RingPoint::RegisteredPatternID();
+            UxModule::LedUtilities::enablePattern(_ringPointID);
 
             _configureLed();
             _rebuildDrawCommands();
@@ -114,20 +114,20 @@ namespace DisplayModule
 
         void onExit() override
         {
-            LED_Utils::disablePattern(_ringPointID);
+            UxModule::LedUtilities::disablePattern(_ringPointID);
             WindowState::onExit();
         }
 
         void onPause() override
         {
             if (_ringPointID >= 0)
-                LED_Utils::disablePattern(_ringPointID);
+                UxModule::LedUtilities::disablePattern(_ringPointID);
         }
 
         void onResume() override
         {
             if (_ringPointID >= 0)
-                LED_Utils::enablePattern(_ringPointID);
+                UxModule::LedUtilities::enablePattern(_ringPointID);
         }
 
         // ------------------------------------------------------------------
@@ -187,7 +187,7 @@ namespace DisplayModule
             // relights on the next tick once a fix returns.
             if (distance < 0)
             {
-                LED_Utils::clearPattern(_ringPointID);
+                UxModule::LedUtilities::clearPattern(_ringPointID);
                 return;
             }
 
@@ -203,8 +203,8 @@ namespace DisplayModule
             cfg["fadeDegrees"]      = fadeDegrees;
             cfg["directionDegrees"] = directionDegrees;
 
-            LED_Utils::configurePattern(_ringPointID, cfg);
-            LED_Utils::iteratePattern(_ringPointID);
+            UxModule::LedUtilities::configurePattern(_ringPointID, cfg);
+            UxModule::LedUtilities::iteratePattern(_ringPointID);
         }
 
         // Bearing to the selected location relative to the device's heading, so
