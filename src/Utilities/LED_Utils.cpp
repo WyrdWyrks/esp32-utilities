@@ -10,8 +10,27 @@ size_t LED_Utils::_PatternTickRateMS = 50;
 
 TaskHandle_t LED_Utils::_IteratePatternsTaskHandle = nullptr;
 
+namespace
+{
+    // The display, LoRa and LED tasks all touch patterns and call FastLED.show();
+    // unguarded that races pattern state and the RMT driver. Recursive because
+    // patterns may call back into LED_Utils.
+    SemaphoreHandle_t LedLock()
+    {
+        static SemaphoreHandle_t lock = xSemaphoreCreateRecursiveMutex();
+        return lock;
+    }
+
+    struct LedLockGuard
+    {
+        LedLockGuard() { xSemaphoreTakeRecursive(LedLock(), portMAX_DELAY); }
+        ~LedLockGuard() { xSemaphoreGiveRecursive(LedLock()); }
+    };
+}
+
 int LED_Utils::registerPattern(LedPatternInterface *pattern)
 {
+    LedLockGuard lock;
     if (pattern == nullptr)
     {
         ESP_LOGW(TAG, "LED_Utils::registerPattern: Attempted to register null pattern");
@@ -27,6 +46,7 @@ int LED_Utils::registerPattern(LedPatternInterface *pattern)
 
 void LED_Utils::unregisterPattern(int patternID)
 {
+    LedLockGuard lock;
     if (registeredPatterns.find(patternID) == registeredPatterns.end())
     {
         return;
@@ -38,6 +58,7 @@ void LED_Utils::unregisterPattern(int patternID)
 
 void LED_Utils::resetPattern(int patternID)
 {
+    LedLockGuard lock;
     if (registeredPatterns.find(patternID) == registeredPatterns.end())
     {
         return;
@@ -48,6 +69,7 @@ void LED_Utils::resetPattern(int patternID)
 
 void LED_Utils::setAnimationLengthMS(int patternID, size_t ms)
 {
+    LedLockGuard lock;
     if (registeredPatterns.find(patternID) == registeredPatterns.end())
     {
         return;
@@ -58,6 +80,7 @@ void LED_Utils::setAnimationLengthMS(int patternID, size_t ms)
 
 void LED_Utils::setAnimationLengthTicks(int patternID, size_t ticks)
 {
+    LedLockGuard lock;
     if (registeredPatterns.find(patternID) == registeredPatterns.end())
     {
         return;
@@ -68,6 +91,7 @@ void LED_Utils::setAnimationLengthTicks(int patternID, size_t ticks)
 
 void LED_Utils::configurePattern(int patternID, JsonDocument &config)
 {
+    LedLockGuard lock;
     if (registeredPatterns.find(patternID) == registeredPatterns.end())
     {
         ESP_LOGW(TAG, "LED_Utils::configurePattern: Attempted to configure non-existent pattern with ID %d", patternID);
@@ -89,6 +113,7 @@ void LED_Utils::configurePattern(int patternID, JsonDocument &config)
 
 void LED_Utils::loopPattern(int patternID, int numLoops)
 {
+    LedLockGuard lock;
     if (registeredPatterns.find(patternID) == registeredPatterns.end())
     {
         return;
@@ -102,6 +127,7 @@ void LED_Utils::loopPattern(int patternID, int numLoops)
 
 void LED_Utils::enablePattern(int patternID)
 {
+    LedLockGuard lock;
     if (registeredPatterns.find(patternID) == registeredPatterns.end())
     {
         ESP_LOGW(TAG, "LED_Utils::enablePattern: Attempted to enable non-existent pattern with ID %d", patternID);
@@ -114,6 +140,7 @@ void LED_Utils::enablePattern(int patternID)
 
 void LED_Utils::disablePattern(int patternID)
 {
+    LedLockGuard lock;
     if (registeredPatterns.find(patternID) == registeredPatterns.end())
     {
         return;
@@ -125,6 +152,7 @@ void LED_Utils::disablePattern(int patternID)
 
 void LED_Utils::clearPattern(int patternID)
 {
+    LedLockGuard lock;
     if (registeredPatterns.find(patternID) == registeredPatterns.end())
     {
         return;
@@ -157,7 +185,10 @@ void LED_Utils::iteratePatterns(void *pvParameters)
     while (true)
     {
         bool workToDo = false;
-        
+        {
+        // Held for one frame only, never across the suspend/delay below.
+        LedLockGuard lock;
+
         // Iterate all patterns that are enable with work to do
         for (auto &pattern : registeredPatterns)
         {
@@ -200,7 +231,8 @@ void LED_Utils::iteratePatterns(void *pvParameters)
         }
 
         FastLED.show();
-        
+        }
+
         if (!workToDo)
         {
             vTaskSuspend(_IteratePatternsTaskHandle);
