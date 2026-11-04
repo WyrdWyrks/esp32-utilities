@@ -8,6 +8,10 @@ public:
     virtual int GetAzimuth() = 0;
     virtual void PrintRawValues() = 0;
 
+    // Debug readout: "magMoniker"/"accelMoniker" strings and "mag"/"accel"
+    // [x, y, z] arrays in each chip's own axes (mag hard-iron corrected).
+    virtual void GetRawValues(JsonDocument &doc) {}
+
     // Calibration
     virtual void BeginCalibration() = 0;
     virtual void IterateCalibration() = 0;
