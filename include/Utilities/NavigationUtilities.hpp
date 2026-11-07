@@ -253,6 +253,14 @@ namespace NavigationModule
             }
         }
 
+        static void GetRawValues(JsonDocument& doc)
+        {
+            if (_Compass())
+            {
+                _Compass()->GetRawValues(doc);
+            }
+        }
+
         // Compass Calibration
         static void BeginCalibration()
         {

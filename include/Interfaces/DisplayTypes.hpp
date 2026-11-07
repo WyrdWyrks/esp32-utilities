@@ -114,6 +114,10 @@ namespace DisplayModule
     {
         INPUT_COMMAND    = 0,
         CALLBACK_COMMAND = 1,
+        // Wake the display task, tick the active window and render once, as
+        // if its refresh interval had just elapsed. For data that changed on
+        // another task (a LoRa message, a fix) and needs to show now.
+        REFRESH_COMMAND  = 2,
     };
 
     struct DisplayCommandQueueItem

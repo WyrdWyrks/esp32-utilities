@@ -113,11 +113,15 @@ namespace DisplayModule
                 ++_step;
                 if (_step >= _sequence.size())
                 {
-                    // Sequence complete — fire the completion action
+                    // Sequence complete — fire the completion action. Return:
+                    // _configureLed() below would index _sequence[_step] past
+                    // the end and re-light a pattern onExit() just disabled.
+                    _step = 0;
                     if (_completionFn)
                     {
                         _completionFn();
                     }
+                    return;
                 }
                 else
                 {
